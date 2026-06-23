@@ -1,0 +1,29 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# Database (contains user data, not for version control)
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp files
+*~
+~$*
+*.tmp
+*.bkp
+_build/
+
+# User documents (not for repo)
+*.docx
+*.png
+*.txt
+!requirements.txt
+启动.bat
