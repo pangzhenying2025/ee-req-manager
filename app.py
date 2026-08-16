@@ -2,32 +2,88 @@
 EE-Req Manager — 汽车电子电气架构需求管理工具
 Streamlit 主应用
 """
-import streamlit as st
-import streamlit.components.v1 as components
-import pandas as pd
 import json
+import os
+import tempfile
 from datetime import datetime
-from sqlalchemy import func as sql_func
+
 import cantools
 import openpyxl
-import tempfile
-import os
-from db import init_db, SessionLocal, Function, Signal, FunctionSignal, FuncRelation, SignalFuncRelation, SysConfig, Project, get_config, set_config, ensure_default_project
-from i18n import t, tpl, lang_selector
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+from sqlalchemy import func as sql_func
 
-# ========== 初始化 ==========
-init_db()
+from collaboration_ui import (
+    collaborator_name,
+    initialize_identity,
+    release_current_lock,
+    render_edit_lock,
+    render_presence,
+    verify_edit_lock,
+)
+from db import (
+    DB_PATH,
+    ArtifactChangeRecord,
+    FuncRelation,
+    Function,
+    FunctionSignal,
+    Project,
+    Requirement,
+    SessionLocal,
+    Signal,
+    SignalEndpoint,
+    SignalFuncRelation,
+    TraceLink,
+    ensure_default_project,
+    get_config,
+    init_db,
+    set_config,
+)
+from i18n import lang_selector, t
+from requirements_knowledge_ui import page_requirements_knowledge
+from requirements_ui import (
+    inject_design_system,
+    page_baselines,
+    page_requirements,
+)
+from requirements_ui import (
+    page_traceability as page_requirement_traceability,
+)
+from signal_flow import (
+    add_receiver,
+    effective_ecus,
+    move_receiver,
+    parse_signal_metadata,
+    reactivate_receiver,
+    remove_receiver,
+    reset_receiver_to_dbc,
+    signal_flow_editor,
+    sync_signal_endpoints,
+)
 
 st.set_page_config(
-    page_title="EE-Req Manager",
+    page_title="EE Requirements & Architecture",
     page_icon="🚗",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+
+@st.cache_resource(show_spinner=False)
+def initialize_database_once(db_path):
+    """Run schema creation/migrations once per Streamlit server process."""
+    init_db()
+    return db_path
+
+
+# ========== 初始化 ==========
+initialize_database_once(DB_PATH)
+inject_design_system()
+
 # ========== 侧边栏 ==========
-st.sidebar.title("🚗 EE-Req Manager")
-st.sidebar.caption(t("汽车电子电气架构需求管理"))
+st.sidebar.title("EE / RA")
+st.sidebar.caption("REQUIREMENTS & ARCHITECTURE")
 st.sidebar.divider()
 
 # ========== 车型选择器 ==========
@@ -56,10 +112,16 @@ st.sidebar.divider()
 lang_selector()
 st.sidebar.divider()
 
+initialize_identity()
+st.sidebar.divider()
+
 # 导航列表（显示标签可翻译，路由key保持中文）
-NAV_KEYS = ["📊 总览仪表盘", "📋 功能管理", "📡 信号管理", "📥 DBC导入",
-            "📥 Excel通讯矩阵", "🔗 功能-信号关联", "🔄 逻辑关系",
-            "📊 追溯矩阵", "📤 数据导出", "🚘 车型管理", "⚙️ 配置管理"]
+NAV_KEYS = [
+    "▦ 工程总览", "▤ 需求规范", "⌁ 需求追溯", "◆ 基线与变更", "▣ 知识与评审",
+    "📋 功能管理", "🔄 功能逻辑", "📡 信号管理", "🔗 功能-信号关联",
+    "📥 DBC导入", "📥 Excel通讯矩阵", "📊 接口追溯矩阵",
+    "📤 数据导出", "🚘 车型管理", "⚙️ 配置管理",
+]
 NAV_LABELS = [t(k) for k in NAV_KEYS]
 page_label = st.sidebar.radio(
     t("导航"),
@@ -68,7 +130,8 @@ page_label = st.sidebar.radio(
 )
 page = NAV_KEYS[NAV_LABELS.index(page_label)]
 st.sidebar.divider()
-st.sidebar.caption(f"v0.3.0 | {datetime.now().strftime('%Y-%m-%d')}")
+render_presence(current_project_id, page)
+st.sidebar.caption(f"v0.7.0 · {datetime.now().strftime('%Y-%m-%d')}")
 
 
 # ========== 通用工具 ==========
@@ -117,18 +180,22 @@ def render_notify():
         del st.session_state._notify
 
 
-def next_id(prefix, model, id_field="func_id"):
+def next_id(prefix, model, id_field="func_id", project_id=None):
     """生成下一个编号 如 FUNC-001"""
     db = get_session()
     try:
-        items = db.query(model).all()
+        query = db.query(model)
+        scoped_project_id = current_project_id if project_id is None else project_id
+        if hasattr(model, "project_id"):
+            query = query.filter(model.project_id == scoped_project_id)
+        items = query.all()
         nums = []
         for item in items:
             val = getattr(item, id_field)
             if val and val.startswith(prefix):
                 try:
                     nums.append(int(val.split("-")[-1]))
-                except:
+                except (ValueError, TypeError):
                     pass
     finally:
         db.close()
@@ -256,9 +323,9 @@ def generate_logic_graph(funcs, rels):
     # 构建边
     edges = []
     rel_colors = {
-        t("触发"): "#E65100", t("互锁"): "#C62828", t("联动"): "#2E7D32",
-        t("依赖"): "#1565C0", t("时序"): "#6A1B9A", t("条件"): "#FF6F00",
-        t("数据流"): "#00695C"
+        "触发": "#E65100", "互锁": "#C62828", "联动": "#2E7D32",
+        "依赖": "#1565C0", "时序": "#6A1B9A", "条件": "#FF6F00",
+        "数据流": "#00695C"
     }
     for r in rels:
         src_f = next((f for f in funcs if f.id == r.source_id), None)
@@ -366,20 +433,22 @@ network.on('click', function(params) {{
 #  📊 总览仪表盘
 # ================================================================
 def page_dashboard():
-    st.title(t("📊 总览仪表盘"))
+    st.markdown('<div class="ee-kicker">PROGRAM / 工程状态</div><div class="ee-title">需求与架构总览</div><div class="ee-subtitle">从需求定义到功能分解、控制器分配和接口验证的单一工程视图。</div>', unsafe_allow_html=True)
     render_notify()
     db = get_session()
     try:
+        req_count = db.query(sql_func.count(Requirement.id)).filter(Requirement.project_id == current_project_id).scalar()
         func_count = db.query(sql_func.count(Function.id)).filter(Function.project_id == current_project_id).scalar()
-        sig_count = db.query(sql_func.count(Signal.id)).scalar()
-        link_count = db.query(sql_func.count(FunctionSignal.id)).scalar()
-        rel_count = db.query(sql_func.count(FuncRelation.id)).scalar()
+        sig_count = db.query(sql_func.count(Signal.id)).filter(Signal.project_id == current_project_id).scalar()
+        link_count = db.query(sql_func.count(TraceLink.id)).filter(TraceLink.project_id == current_project_id).scalar()
+        rel_count = db.query(sql_func.count(FuncRelation.id)).filter(FuncRelation.project_id == current_project_id).scalar()
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(t("📋 车辆功能"), func_count)
-        c2.metric(t("📡 CAN信号"), sig_count)
-        c3.metric(t("🔗 关联绑定"), link_count)
-        c4.metric(t("🔄 逻辑关系"), rel_count)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("需求", req_count)
+        c2.metric(t("📋 车辆功能"), func_count)
+        c3.metric(t("📡 CAN信号"), sig_count)
+        c4.metric("需求追溯", link_count)
+        c5.metric(t("🔄 逻辑关系"), rel_count)
 
         st.divider()
 
@@ -388,7 +457,7 @@ def page_dashboard():
             st.subheader(t("功能分布"))
             cats = db.query(
                 Function.category, sql_func.count(Function.id)
-            ).group_by(Function.category).all()
+            ).filter(Function.project_id == current_project_id).group_by(Function.category).all()
             if cats:
                 df_cat = pd.DataFrame(cats, columns=[t("功能域"), t("数量")]).fillna(t("未分类"))
                 st.bar_chart(df_cat.set_index("功能域"))
@@ -397,14 +466,14 @@ def page_dashboard():
             st.subheader(t("ECU归属分布"))
             ecus = db.query(
                 Function.module, sql_func.count(Function.id)
-            ).group_by(Function.module).all()
+            ).filter(Function.project_id == current_project_id).group_by(Function.module).all()
             if ecus:
                 df_ecu = pd.DataFrame(ecus, columns=["ECU", t("数量")]).fillna(t("未分配"))
                 st.bar_chart(df_ecu.set_index("ECU"))
 
             # 最近添加的功能
             st.subheader(t("最近添加的功能"))
-            recent = db.query(Function).order_by(Function.created_at.desc()).limit(5).all()
+            recent = db.query(Function).filter_by(project_id=current_project_id).order_by(Function.created_at.desc()).limit(5).all()
             if recent:
                 df_r = pd.DataFrame([{
                     t("编号"): f.func_id,
@@ -452,9 +521,9 @@ def page_functions():
                     f_mod = st.selectbox(t("按ECU筛选"), [t("全部")] + modules, key="f_mod")
 
                 filtered = funcs
-                if f_cat != "全部":
+                if f_cat != t("全部"):
                     filtered = [f for f in filtered if f.category == f_cat]
-                if f_mod != "全部":
+                if f_mod != t("全部"):
                     filtered = [f for f in filtered if f.module == f_mod]
 
                 if filtered:
@@ -479,8 +548,11 @@ def page_functions():
                                                   (f.func_id + " " + f.name for f in filtered if f.func_id == x), x),
                                               key="del_func")
                         if st.button(t("确认删除"), type="primary", key="del_func_btn"):
-                            target = db.query(Function).filter_by(func_id=del_id).first()
+                            target = db.query(Function).filter_by(func_id=del_id, project_id=current_project_id).first()
                             if target:
+                                db.query(SignalFuncRelation).filter_by(project_id=current_project_id, func_id=target.id).delete()
+                                db.query(TraceLink).filter_by(project_id=current_project_id, source_type="Function", source_id=target.id).delete()
+                                db.query(TraceLink).filter_by(project_id=current_project_id, target_type="Function", target_id=target.id).delete()
                                 db.delete(target)
                                 db.commit()
                                 notify(f"已删除 {del_id}")
@@ -534,7 +606,13 @@ def page_functions():
                     # 获取选中功能的当前值（避免ORM对象引用问题）
                     edit_id = edit_sel.func_id
                     # 从数据库重新获取最新数据
-                    current_func = db.query(Function).filter_by(func_id=edit_id).first()
+                    current_func = db.query(Function).filter_by(func_id=edit_id, project_id=current_project_id).first()
+                    can_edit = render_edit_lock(
+                        project_id=current_project_id,
+                        artifact_type="Function",
+                        artifact_id=current_func.id,
+                        artifact_label=f"{current_func.func_id} · {current_func.name}",
+                    )
 
                     with st.form("edit_func"):
                         c1, c2, c3 = st.columns(3)
@@ -554,10 +632,17 @@ def page_functions():
                                                  index=asil_levels.index(current_func.asil_level) if current_func.asil_level in asil_levels else 0)
                         edesc = st.text_area(t("功能描述"), value=current_func.description or "", height=100)
 
-                        if st.form_submit_button(t("💾 保存修改"), type="primary"):
+                        save_function = st.form_submit_button(
+                            t("💾 保存修改"),
+                            type="primary",
+                            disabled=not can_edit,
+                        )
+                        if save_function:
                             # 重新查询，确保只更新选中的那条记录
-                            target = db.query(Function).filter_by(func_id=edit_id).first()
-                            if target:
+                            target = db.query(Function).filter_by(func_id=edit_id, project_id=current_project_id).first()
+                            if not verify_edit_lock(current_project_id, "Function", current_func.id):
+                                st.error("编辑权已失效或已被其他成员取得，本次内容未保存。")
+                            elif target:
                                 target.name = ename
                                 target.category = ecat
                                 target.module = emod
@@ -567,6 +652,7 @@ def page_functions():
                                 target.asil_level = easil if easil != "-" else None
                                 target.updated_at = datetime.utcnow()
                                 db.commit()
+                                release_current_lock(current_project_id, "Function", current_func.id)
                                 notify(f"✅ {edit_id} 已更新")
                                 st.rerun()
     finally:
@@ -618,8 +704,11 @@ def page_signals():
                                                (s.signal_id + " " + s.name for s in sigs if s.signal_id == x), x),
                                            key="del_sig")
                     if st.button(t("确认删除"), type="primary", key="del_sig_btn"):
-                        target = db.query(Signal).filter_by(signal_id=del_sid).first()
+                        target = db.query(Signal).filter_by(signal_id=del_sid, project_id=current_project_id).first()
                         if target:
+                            db.query(SignalFuncRelation).filter_by(project_id=current_project_id, signal_id=target.id).delete()
+                            db.query(TraceLink).filter_by(project_id=current_project_id, source_type="Signal", source_id=target.id).delete()
+                            db.query(TraceLink).filter_by(project_id=current_project_id, target_type="Signal", target_id=target.id).delete()
                             db.delete(target)
                             db.commit()
                             notify(f"已删除 {del_sid}")
@@ -667,7 +756,7 @@ def page_signals():
                             bit_length=sbits, factor=sfactor, offset=soffset,
                             min_value=smin, max_value=smax, unit=sunit,
                             byte_order=sbo, value_type=svt, cycle_time=scycle,
-                            description=sdesc
+                            description=sdesc, project_id=current_project_id
                         )
                         db.add(new_sig)
                         db.commit()
@@ -677,7 +766,7 @@ def page_signals():
 
         # --- 编辑信号 ---
         elif tab == "✏️ 编辑信号":
-            sigs_all = db.query(Signal).order_by(Signal.signal_id).all()
+            sigs_all = db.query(Signal).filter_by(project_id=current_project_id).order_by(Signal.signal_id).all()
             if not sigs_all:
                 st.info(t("暂无信号可编辑。"))
             else:
@@ -689,7 +778,13 @@ def page_signals():
                     # 获取选中信号的当前值（避免ORM对象引用问题）
                     edit_id = edit_sel.signal_id
                     # 从数据库重新获取最新数据
-                    current_sig = db.query(Signal).filter_by(signal_id=edit_id).first()
+                    current_sig = db.query(Signal).filter_by(signal_id=edit_id, project_id=current_project_id).first()
+                    can_edit = render_edit_lock(
+                        project_id=current_project_id,
+                        artifact_type="Signal",
+                        artifact_id=current_sig.id,
+                        artifact_label=f"{current_sig.signal_id} · {current_sig.name}",
+                    )
 
                     with st.form("edit_sig"):
                         c1, c2, c3 = st.columns(3)
@@ -706,18 +801,62 @@ def page_signals():
                             eoffset = st.number_input("偏移", value=safe_num(current_sig.offset, float, 0.0), format="%.2f")
                             eunit = st.text_input("单位", value=current_sig.unit or "")
 
-                        c4, c5 = st.columns(2)
+                        c4, c5, c6 = st.columns(3)
                         with c4:
                             emin = st.number_input("最小值", value=safe_num(current_sig.min_value, float, 0.0), format="%.2f")
                             emax = st.number_input("最大值", value=safe_num(current_sig.max_value, float, 255.0), format="%.2f")
                         with c5:
                             ecycle = st.number_input("周期ms", min_value=0, value=safe_num(current_sig.cycle_time, int, 100), step=10)
-                            edesc = st.text_area(t("描述"), value=current_sig.description or "", height=80)
+                            current_byte_order = (
+                                current_sig.byte_order
+                                if current_sig.byte_order in byte_orders
+                                else "Motorola"
+                            )
+                            ebyte_order = st.selectbox(
+                                t("字节序"),
+                                byte_orders,
+                                index=byte_orders.index(current_byte_order),
+                                format_func=lambda value: (
+                                    "Motorola（Big Endian）"
+                                    if value == "Motorola"
+                                    else "Intel（Little Endian）"
+                                ),
+                                help="切换字节序会改变多字节信号的位布局解释；平台不会自动换算起始位。",
+                            )
+                        with c6:
+                            current_value_type = (
+                                current_sig.value_type
+                                if current_sig.value_type in value_types
+                                else "Unsigned"
+                            )
+                            evalue_type = st.selectbox(
+                                t("值类型"),
+                                value_types,
+                                index=value_types.index(current_value_type),
+                                format_func=lambda value: (
+                                    "无符号 Unsigned"
+                                    if value == "Unsigned"
+                                    else "有符号 Signed"
+                                ),
+                            )
 
-                        if st.form_submit_button(t("💾 保存修改"), type="primary"):
+                        st.caption(
+                            "⚠️ 从 Motorola 切换到 Intel（或反向切换）时，请同时核对起始位、"
+                            "位长和DBC定义；系统只修改格式，不会自动重排位号。"
+                        )
+                        edesc = st.text_area(t("描述"), value=current_sig.description or "", height=80)
+
+                        save_signal = st.form_submit_button(
+                            t("💾 保存修改"),
+                            type="primary",
+                            disabled=not can_edit,
+                        )
+                        if save_signal:
                             # 重新查询，确保只更新选中的那条记录
-                            target = db.query(Signal).filter_by(signal_id=edit_id).first()
-                            if target:
+                            target = db.query(Signal).filter_by(signal_id=edit_id, project_id=current_project_id).first()
+                            if not verify_edit_lock(current_project_id, "Signal", current_sig.id):
+                                st.error("编辑权已失效或已被其他成员取得，本次内容未保存。")
+                            elif target:
                                 target.name = ename
                                 target.message_name = emsg
                                 target.message_id = emsgid
@@ -730,8 +869,27 @@ def page_signals():
                                 target.min_value = emin
                                 target.max_value = emax
                                 target.cycle_time = ecycle
+                                target.byte_order = ebyte_order
+                                target.value_type = evalue_type
                                 target.description = edesc
+                                for field_name, old_value, new_value in (
+                                    ("byte_order", current_byte_order, ebyte_order),
+                                    ("value_type", current_value_type, evalue_type),
+                                ):
+                                    if old_value != new_value:
+                                        db.add(ArtifactChangeRecord(
+                                            project_id=current_project_id,
+                                            artifact_type="Signal",
+                                            artifact_id=target.id,
+                                            change_type="Update",
+                                            field_name=field_name,
+                                            old_value=str(old_value),
+                                            new_value=str(new_value),
+                                            reason="手工编辑信号格式",
+                                            changed_by=collaborator_name(),
+                                        ))
                                 db.commit()
+                                release_current_lock(current_project_id, "Signal", current_sig.id)
                                 notify(f"✅ {edit_id} 已更新")
                                 st.rerun()
     finally:
@@ -749,8 +907,8 @@ def page_func_signal():
     directions = ["Input", "Output", "Feedback"]
 
     try:
-        funcs = db.query(Function).order_by(Function.func_id).all()
-        sigs = db.query(Signal).order_by(Signal.signal_id).all()
+        funcs = db.query(Function).filter_by(project_id=current_project_id).order_by(Function.func_id).all()
+        sigs = db.query(Signal).filter_by(project_id=current_project_id).order_by(Signal.signal_id).all()
 
         if not funcs or not sigs:
             st.warning(t("请先添加功能和信号数据。"))
@@ -806,7 +964,7 @@ def page_func_signal():
                         st.rerun()
 
         with tab_view:
-            links = db.query(FunctionSignal).all()
+            links = db.query(FunctionSignal).join(Function).filter(Function.project_id == current_project_id).all()
             if not links:
                 st.info(t("暂无关联数据。"))
             else:
@@ -815,19 +973,19 @@ def page_func_signal():
                 f_filter = st.selectbox(t("按功能筛选"), func_opts, key="link_filter")
 
                 rows = []
-                for l in links:
+                for link_item in links:
                     if f_filter != "全部":
-                        fobj = db.query(Function).get(l.function_id)
+                        fobj = db.get(Function, link_item.function_id)
                         if f"{fobj.func_id} — {fobj.name}" != f_filter:
                             continue
-                    fobj = db.query(Function).get(l.function_id)
-                    sobj = db.query(Signal).get(l.signal_id)
+                    fobj = db.get(Function, link_item.function_id)
+                    sobj = db.get(Signal, link_item.signal_id)
                     rows.append({
                         t("功能"): f"{fobj.func_id} {fobj.name}",
                         t("信号"): f"{sobj.signal_id} {sobj.name}",
-                        t("方向"): l.direction,
-                        t("用途"): l.usage_desc or "-",
-                        t("必需"): "✅" if l.is_required else "❌"
+                        t("方向"): link_item.direction,
+                        t("用途"): link_item.usage_desc or "-",
+                        t("必需"): "✅" if link_item.is_required else "❌"
                     })
 
                 if rows:
@@ -853,8 +1011,541 @@ def page_func_signal():
 # ================================================================
 #  🔄 逻辑关系
 # ================================================================
+def _set_flow_notice(kind, message):
+    st.session_state.flow_notify = {"kind": kind, "message": message}
+
+
+def _add_flow_receiver(project_id, signal_id, signal_name, ecu_key, reason_key, changed_by_key):
+    callback_db = get_session()
+    try:
+        if not verify_edit_lock(project_id, "SignalFlow", signal_id):
+            _set_flow_notice("error", "编辑权已失效或已被其他成员取得，本次端点变更未保存。")
+            return
+        endpoint = add_receiver(
+            callback_db,
+            project_id=project_id,
+            signal_id=signal_id,
+            new_ecu=st.session_state.get(ecu_key, ""),
+            reason=st.session_state.get(reason_key, ""),
+            changed_by=st.session_state.get(changed_by_key, "当前用户"),
+        )
+        st.session_state.pop("flow_pending_endpoint_change", None)
+        _set_flow_notice("success", f"✅ {signal_name} 已新增接收分支 {endpoint.ecu_name}")
+    except ValueError as exc:
+        callback_db.rollback()
+        _set_flow_notice("error", str(exc))
+    finally:
+        callback_db.close()
+
+
+def _delete_flow_receiver(project_id, signal_name, endpoint_id, endpoint_name, reason_key, changed_by_key):
+    callback_db = get_session()
+    try:
+        endpoint = callback_db.query(SignalEndpoint).filter_by(
+            id=endpoint_id,
+            project_id=project_id,
+        ).first()
+        if endpoint is None or not verify_edit_lock(project_id, "SignalFlow", endpoint.signal_id):
+            _set_flow_notice("error", "编辑权已失效或已被其他成员取得，本次端点变更未保存。")
+            return
+        remove_receiver(
+            callback_db,
+            project_id=project_id,
+            endpoint_id=endpoint_id,
+            reason=st.session_state.get(reason_key, ""),
+            changed_by=st.session_state.get(changed_by_key, "当前用户"),
+        )
+        _set_flow_notice("success", f"✅ 已停用 {signal_name} → {endpoint_name}")
+    except ValueError as exc:
+        callback_db.rollback()
+        _set_flow_notice("error", str(exc))
+    finally:
+        callback_db.close()
+
+
+def render_signal_flow_workbench(db, signals, project_id):
+    """Editable DBC-backed signal flow with staged, auditable endpoint changes."""
+    sync_token = (len(signals), max((signal.id for signal in signals), default=0))
+    sync_state_key = f"flow_endpoint_sync_token_{project_id}"
+    if st.session_state.get(sync_state_key) != sync_token:
+        sync_result = sync_signal_endpoints(db, project_id)
+        st.session_state[sync_state_key] = sync_token
+    else:
+        sync_result = {"signals": len(signals), "tx_added": 0, "rx_added": 0}
+    all_endpoints = db.query(SignalEndpoint).filter_by(project_id=project_id).all()
+    endpoints = [row for row in all_endpoints if row.is_active]
+    endpoint_map = {}
+    for endpoint in endpoints:
+        endpoint_map.setdefault(endpoint.signal_id, []).append(endpoint)
+
+    metadata = {signal.id: parse_signal_metadata(signal) for signal in signals}
+    bus_options = sorted({meta.bus for meta in metadata.values()})
+    if not bus_options:
+        st.info("当前车型还没有可用于绘图的 DBC 信号。")
+        return
+
+    stat_cols = st.columns(5)
+    stat_cols[0].metric("总线", len(bus_options))
+    stat_cols[1].metric("信号", len(signals))
+    stat_cols[2].metric("发送端点", sum(1 for row in endpoints if row.endpoint_role == "Tx"))
+    stat_cols[3].metric("接收端点", sum(1 for row in endpoints if row.endpoint_role == "Rx"))
+    change_count = db.query(ArtifactChangeRecord).filter_by(
+        project_id=project_id,
+        artifact_type="SignalEndpoint",
+    ).count()
+    stat_cols[4].metric("端点变更", change_count)
+    if sync_result["tx_added"] or sync_result["rx_added"]:
+        st.caption(
+            f"已从 DBC 证据初始化 {sync_result['tx_added']} 个发送端点、"
+            f"{sync_result['rx_added']} 个接收端点；原始描述未被修改。"
+        )
+
+    f1, f2, f3 = st.columns([1.1, 2.2, 1.2])
+    with f1:
+        selected_bus = st.selectbox("总线", bus_options, key="flow_bus")
+    bus_signals = [signal for signal in signals if metadata[signal.id].bus == selected_bus]
+    messages = {}
+    for signal in bus_signals:
+        key = (signal.message_name or "未命名报文", signal.message_id or "")
+        messages.setdefault(key, []).append(signal)
+    message_keys = sorted(messages, key=lambda item: (item[0], item[1]))
+    with f2:
+        selected_message = st.selectbox(
+            "报文",
+            message_keys,
+            format_func=lambda item: f"{item[0]} · {item[1] or '无ID'} · {len(messages[item])} signals",
+            key="flow_message",
+        )
+    with f3:
+        view_label = st.radio(
+            "视图",
+            ["报文聚合", "信号明细"],
+            index=1,
+            horizontal=True,
+            key="flow_view_mode",
+        )
+
+    selected_signals = messages[selected_message]
+    selected_signal_ids = {signal.id for signal in selected_signals}
+    selected_endpoints = [row for row in endpoints if row.signal_id in selected_signal_ids]
+    actual_receivers = effective_ecus(row for row in selected_endpoints if row.endpoint_role == "Rx")
+    configured_ecus = get_config(db, "ecu_list", []) or []
+    all_ecus = sorted(set(configured_ecus) | {row.ecu_name for row in all_endpoints if row.ecu_name})
+    message_key = f"{project_id}_{selected_bus}_{selected_message[0]}_{selected_message[1]}"
+    with st.expander("画布设置", expanded=False):
+        candidates = st.multiselect(
+            "选择可在图中拖放的 ECU",
+            all_ecus,
+            default=actual_receivers,
+            key=f"flow_candidates_{message_key}",
+            help="信号明细模式下，可把新增分支手柄或现有连线末端拖到这些 ECU。",
+        )
+        if not candidates:
+            candidates = actual_receivers
+        display_c1, display_c2 = st.columns(2)
+        with display_c1:
+            line_style = st.radio(
+                "连线外观",
+                ["曲线", "直角"],
+                horizontal=True,
+                key=f"flow_line_style_{message_key}",
+            )
+        with display_c2:
+            compact_view = st.checkbox(
+                "紧凑视图",
+                value=False,
+                key=f"flow_compact_{message_key}",
+            )
+        if st.button("重新同步 DBC 端点", key=f"flow_resync_{project_id}"):
+            st.session_state.pop(sync_state_key, None)
+            st.rerun(scope="fragment")
+
+    tx_names = [
+        row.ecu_name for row in selected_endpoints
+        if row.endpoint_role == "Tx" and row.ecu_name
+    ]
+    if not tx_names:
+        tx_names = [metadata[selected_signals[0].id].tx] if selected_signals else []
+    tx_names = sorted(set(filter(None, tx_names)))
+    message_payload = {
+        "name": selected_message[0],
+        "id": selected_message[1],
+        "bus": selected_bus,
+        "tx": ", ".join(tx_names) if tx_names else "未分配发送节点",
+    }
+    signal_payload = []
+    for signal in selected_signals:
+        receivers = [
+            {
+                "endpoint_id": row.id,
+                "ecu": row.ecu_name,
+                "dbc_ecu": row.dbc_ecu_name,
+                "is_override": row.ecu_name != row.dbc_ecu_name,
+            }
+            for row in endpoint_map.get(signal.id, [])
+            if row.endpoint_role == "Rx" and row.is_active
+        ]
+        signal_payload.append({
+            "id": signal.id,
+            "signal_id": signal.signal_id,
+            "name": signal.name,
+            "start_bit": signal.start_bit,
+            "bit_length": signal.bit_length,
+            "unit": signal.unit,
+            "receivers": receivers,
+        })
+
+    graph_col, inspector_col = st.columns([3.6, 1.4], gap="medium")
+    with graph_col:
+        st.markdown(
+            "<div style='font:700 12px Bahnschrift;color:#ff6b35;letter-spacing:.15em;'>"
+            "LIVE DATA-FLOW CANVAS</div>",
+            unsafe_allow_html=True,
+        )
+        event = signal_flow_editor(
+            mode="aggregate" if view_label == "报文聚合" else "detail",
+            message=message_payload,
+            signals=signal_payload,
+            ecu_candidates=candidates,
+            selected_signal_id=st.session_state.get("flow_selected_signal"),
+            viewport_state=st.session_state.get(f"flow_viewport_{message_key}"),
+            view_state_key=message_key,
+            line_style="orthogonal" if line_style == "直角" else "curved",
+            compact=compact_view,
+            # Keep one component identity while switching aggregate/detail mode.
+            # Replacing the iframe key leaves the old component event in flight
+            # and can make the next interaction render stale aggregate props.
+            key=f"flow_canvas_{message_key}",
+        )
+        if isinstance(event, dict) and event.get("nonce") != st.session_state.get("flow_last_event"):
+            st.session_state.flow_last_event = event.get("nonce")
+            if isinstance(event.get("viewport"), dict):
+                st.session_state[f"flow_viewport_{message_key}"] = event["viewport"]
+            if event.get("action") in {"select_signal", "move_receiver", "add_receiver"}:
+                st.session_state.flow_selected_signal = event.get("signal_id")
+            if event.get("action") == "select_signal":
+                st.session_state.pop("flow_pending_endpoint_change", None)
+                # The component was rendered with the previous selection before
+                # this event arrived. Re-render only this fragment so the canvas
+                # highlight and the inspector always point to the same signal.
+                st.rerun(scope="fragment")
+            elif event.get("action") in {"move_receiver", "add_receiver"}:
+                st.session_state.flow_pending_endpoint_change = event
+                st.session_state.flow_connection_operation = (
+                    "新增分支" if event.get("action") == "add_receiver" else "移动连接"
+                )
+
+    with inspector_col:
+        selected_id = st.session_state.get("flow_selected_signal")
+        selected_signal = next((signal for signal in selected_signals if signal.id == selected_id), None)
+        if selected_signal is None and selected_signals:
+            selected_signal = selected_signals[0]
+            st.session_state.flow_selected_signal = selected_signal.id
+
+        st.markdown("#### 信号属性")
+        if selected_signal is None:
+            st.caption("点击图中的信号查看属性。")
+        else:
+            meta = metadata[selected_signal.id]
+            st.markdown(f"**{selected_signal.name}**")
+            st.caption(selected_signal.signal_id)
+            props = {
+                "报文": selected_signal.message_name or "—",
+                "起始位 / 长度": f"{selected_signal.start_bit} / {selected_signal.bit_length}",
+                "精度 Factor": selected_signal.factor,
+                "偏移量 Offset": selected_signal.offset,
+                "范围": f"{selected_signal.min_value} ～ {selected_signal.max_value}",
+                "单位": selected_signal.unit or "—",
+                "字节序": selected_signal.byte_order or "—",
+                "周期": f"{selected_signal.cycle_time} ms" if selected_signal.cycle_time is not None else "—",
+            }
+            for label, value in props.items():
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;border-bottom:1px solid #e4e1da;"
+                    f"padding:5px 0;font-size:12px;gap:8px'><span style='color:#68757d'>{label}</span>"
+                    f"<b style='text-align:right'>{value}</b></div>",
+                    unsafe_allow_html=True,
+                )
+            if meta.source:
+                st.caption(f"DBC 来源：{meta.source}")
+
+            rx_endpoints = [
+                row for row in endpoint_map.get(selected_signal.id, [])
+                if row.endpoint_role == "Rx" and row.is_active
+            ]
+            inactive_rx = [
+                row for row in all_endpoints
+                if row.signal_id == selected_signal.id
+                and row.endpoint_role == "Rx"
+                and not row.is_active
+            ]
+            can_edit_flow = render_edit_lock(
+                project_id=project_id,
+                artifact_type="SignalFlow",
+                artifact_id=selected_signal.id,
+                artifact_label=f"数据流 {selected_signal.name}",
+            )
+            st.markdown(f"#### 接收端点 · {len(rx_endpoints)}")
+            if rx_endpoints:
+                endpoint_labels = []
+                for row in rx_endpoints:
+                    source_label = "DBC" if row.dbc_ecu_name and row.ecu_name == row.dbc_ecu_name else "项目"
+                    endpoint_labels.append(f"`{row.ecu_name}` · {source_label}")
+                st.markdown("　".join(endpoint_labels))
+            else:
+                st.warning("当前信号没有有效接收节点，可以新增第一个接收分支。")
+
+            pending = st.session_state.get("flow_pending_endpoint_change") or {}
+            if pending.get("signal_id") != selected_signal.id:
+                pending = {}
+            operations = ["新增分支"] + (["移动连接", "删除连接"] if rx_endpoints else [])
+            current_operation = st.session_state.get("flow_connection_operation", operations[0])
+            if current_operation not in operations:
+                st.session_state.flow_connection_operation = operations[0]
+            operation = st.radio(
+                "连接操作",
+                operations,
+                horizontal=True,
+                key="flow_connection_operation",
+            )
+            operation_nonce = pending.get("nonce", "manual")
+
+            if operation == "新增分支":
+                current_receivers = {row.ecu_name for row in rx_endpoints}
+                add_options = [ecu for ecu in all_ecus if ecu not in current_receivers]
+                if not add_options:
+                    st.info("候选 ECU 均已连接；可在“画布设置”中补充其他 ECU。")
+                else:
+                    proposed_ecu = pending.get("new_ecu") if pending.get("action") == "add_receiver" else None
+                    add_index = add_options.index(proposed_ecu) if proposed_ecu in add_options else 0
+                    add_ecu_key = f"flow_add_ecu_{selected_signal.id}_{operation_nonce}"
+                    add_reason_key = f"flow_add_reason_{selected_signal.id}_{operation_nonce}"
+                    add_changed_by_key = f"flow_add_by_{selected_signal.id}"
+                    with st.form(f"flow_add_form_{selected_signal.id}_{operation_nonce}"):
+                        st.selectbox("新增接收 ECU", add_options, index=add_index, key=add_ecu_key)
+                        st.text_area(
+                            "新增原因 *",
+                            placeholder="例如：新增 GW 作为该信号的并行接收节点，不替换原有 IVI。",
+                            height=76,
+                            key=add_reason_key,
+                        )
+                        st.text_input("变更人", value=collaborator_name(), key=add_changed_by_key)
+                        st.form_submit_button(
+                            "新增接收分支",
+                            type="primary",
+                            use_container_width=True,
+                            disabled=not can_edit_flow,
+                            on_click=_add_flow_receiver,
+                            args=(
+                                project_id,
+                                selected_signal.id,
+                                selected_signal.name,
+                                add_ecu_key,
+                                add_reason_key,
+                                add_changed_by_key,
+                            ),
+                        )
+
+            elif operation == "移动连接":
+                pending_endpoint_id = pending.get("endpoint_id") if pending.get("action") == "move_receiver" else None
+                endpoint_index = next(
+                    (idx for idx, row in enumerate(rx_endpoints) if row.id == pending_endpoint_id),
+                    0,
+                )
+                selected_endpoint = st.selectbox(
+                    "需要移动的连接",
+                    rx_endpoints,
+                    index=endpoint_index,
+                    format_func=lambda row: (
+                        f"{row.ecu_name}"
+                        + (f" ← DBC:{row.dbc_ecu_name}" if row.ecu_name != row.dbc_ecu_name else "")
+                    ),
+                    key=f"flow_move_endpoint_{selected_signal.id}_{operation_nonce}",
+                )
+                move_options = [ecu for ecu in all_ecus if ecu not in {row.ecu_name for row in rx_endpoints}]
+                proposed_ecu = pending.get("new_ecu") if pending_endpoint_id == selected_endpoint.id else None
+                if proposed_ecu and proposed_ecu not in move_options:
+                    move_options.append(proposed_ecu)
+                if not move_options:
+                    st.info("没有尚未连接的候选 ECU。")
+                else:
+                    move_index = move_options.index(proposed_ecu) if proposed_ecu in move_options else 0
+                    with st.form(f"flow_move_form_{selected_signal.id}_{selected_endpoint.id}_{operation_nonce}"):
+                        move_ecu = st.selectbox("移动到 ECU", move_options, index=move_index)
+                        move_reason = st.text_area(
+                            "移动原因 *",
+                            placeholder="移动会替换这一条接收连接，不影响该信号的其他接收 ECU。",
+                            height=76,
+                        )
+                        move_changed_by = st.text_input("变更人", value=collaborator_name(), key="flow_move_by")
+                        save_move = st.form_submit_button(
+                            "保存移动",
+                            type="primary",
+                            use_container_width=True,
+                            disabled=not can_edit_flow,
+                        )
+                    if save_move:
+                        if not verify_edit_lock(project_id, "SignalFlow", selected_signal.id):
+                            st.error("编辑权已失效或已被其他成员取得，本次端点变更未保存。")
+                        else:
+                            try:
+                                move_receiver(
+                                    db,
+                                    project_id=project_id,
+                                    endpoint_id=selected_endpoint.id,
+                                    new_ecu=move_ecu,
+                                    reason=move_reason,
+                                    changed_by=move_changed_by,
+                                )
+                                st.session_state.pop("flow_pending_endpoint_change", None)
+                                st.session_state.flow_notify = f"✅ 已将一条接收连接移动到 {move_ecu}"
+                                st.rerun(scope="fragment")
+                            except ValueError as exc:
+                                st.error(str(exc))
+
+            elif operation == "删除连接":
+                delete_endpoint = st.selectbox(
+                    "需要删除的连接",
+                    rx_endpoints,
+                    format_func=lambda row: f"{row.ecu_name} · {'DBC来源' if row.dbc_ecu_name else '人工新增'}",
+                    key=f"flow_delete_endpoint_{selected_signal.id}",
+                )
+                delete_reason_key = f"flow_delete_reason_{delete_endpoint.id}"
+                delete_changed_by_key = f"flow_delete_by_{selected_signal.id}"
+                with st.form(f"flow_delete_form_{delete_endpoint.id}"):
+                    st.text_area(
+                        "删除原因 *",
+                        placeholder="删除仅停用当前项目中的连接，DBC 原始证据和审计记录仍保留。",
+                        height=76,
+                        key=delete_reason_key,
+                    )
+                    st.text_input("变更人", value=collaborator_name(), key=delete_changed_by_key)
+                    st.form_submit_button(
+                        "删除接收连接",
+                        use_container_width=True,
+                        disabled=not can_edit_flow,
+                        on_click=_delete_flow_receiver,
+                        args=(
+                            project_id,
+                            selected_signal.name,
+                            delete_endpoint.id,
+                            delete_endpoint.ecu_name,
+                            delete_reason_key,
+                            delete_changed_by_key,
+                        ),
+                    )
+
+            moved_endpoints = [
+                row for row in rx_endpoints
+                if row.dbc_ecu_name and row.ecu_name != row.dbc_ecu_name
+            ]
+            if moved_endpoints:
+                with st.expander("恢复 DBC 原始节点"):
+                    reset_endpoint = st.selectbox(
+                        "选择连接",
+                        moved_endpoints,
+                        format_func=lambda row: f"{row.ecu_name} → {row.dbc_ecu_name}",
+                        key=f"flow_reset_endpoint_{selected_signal.id}",
+                    )
+                    with st.form(f"flow_reset_form_{reset_endpoint.id}"):
+                        reset_reason = st.text_input("恢复原因 *", placeholder="说明为何恢复到 DBC 原始节点")
+                        if st.form_submit_button(
+                            "恢复 DBC 原始节点",
+                            use_container_width=True,
+                            disabled=not can_edit_flow,
+                        ):
+                            if not verify_edit_lock(project_id, "SignalFlow", selected_signal.id):
+                                st.error("编辑权已失效，本次恢复未执行。")
+                            else:
+                                try:
+                                    reset_receiver_to_dbc(
+                                        db,
+                                        project_id=project_id,
+                                        endpoint_id=reset_endpoint.id,
+                                        reason=reset_reason,
+                                    )
+                                    st.session_state.flow_notify = f"✅ 已恢复到 DBC 原始接收节点 {reset_endpoint.dbc_ecu_name}"
+                                    st.rerun(scope="fragment")
+                                except ValueError as exc:
+                                    st.error(str(exc))
+
+            if inactive_rx:
+                with st.expander(f"恢复已删除连接 · {len(inactive_rx)}"):
+                    restore_endpoint = st.selectbox(
+                        "已删除连接",
+                        inactive_rx,
+                        format_func=lambda row: f"{row.ecu_name} · {'DBC来源' if row.dbc_ecu_name else '人工新增'}",
+                        key=f"flow_reactivate_endpoint_{selected_signal.id}",
+                    )
+                    with st.form(f"flow_reactivate_form_{restore_endpoint.id}"):
+                        restore_reason = st.text_input("恢复原因 *", placeholder="说明重新启用该接收连接的原因")
+                        if st.form_submit_button(
+                            "恢复连接",
+                            use_container_width=True,
+                            disabled=not can_edit_flow,
+                        ):
+                            if not verify_edit_lock(project_id, "SignalFlow", selected_signal.id):
+                                st.error("编辑权已失效，本次恢复未执行。")
+                            else:
+                                try:
+                                    reactivate_receiver(
+                                        db,
+                                        project_id=project_id,
+                                        endpoint_id=restore_endpoint.id,
+                                        reason=restore_reason,
+                                    )
+                                    st.session_state.flow_notify = f"✅ 已恢复接收连接 {restore_endpoint.ecu_name}"
+                                    st.rerun(scope="fragment")
+                                except ValueError as exc:
+                                    st.error(str(exc))
+
+    with st.expander("变更审计记录", expanded=False):
+        changes = db.query(ArtifactChangeRecord).filter_by(
+            project_id=project_id,
+            artifact_type="SignalEndpoint",
+        ).order_by(ArtifactChangeRecord.changed_at.desc()).limit(100).all()
+        if not changes:
+            st.caption("尚无人工端点变更。")
+        else:
+            endpoint_by_id = {row.id: row for row in all_endpoints}
+            signal_by_id = {signal.id: signal for signal in signals}
+            rows = []
+            for change in changes:
+                endpoint = endpoint_by_id.get(change.artifact_id)
+                signal = signal_by_id.get(endpoint.signal_id) if endpoint else None
+                rows.append({
+                    "时间": change.changed_at.strftime("%Y-%m-%d %H:%M:%S") if change.changed_at else "—",
+                    "信号": signal.name if signal else f"端点#{change.artifact_id}",
+                    "变更": f"{change.old_value} → {change.new_value}",
+                    "原因": change.reason,
+                    "变更人": change.changed_by or "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+@st.fragment
+def render_signal_flow_fragment(project_id):
+    """Isolate frequent graph edits from the rest of the Streamlit page."""
+    flow_message = st.session_state.pop("flow_notify", None)
+    if flow_message:
+        if isinstance(flow_message, dict) and flow_message.get("kind") == "error":
+            st.error(flow_message.get("message", "端点变更失败"))
+        elif isinstance(flow_message, dict):
+            st.success(flow_message.get("message", "端点变更已保存"))
+        else:
+            st.success(flow_message)
+    fragment_db = get_session()
+    try:
+        fragment_signals = fragment_db.query(Signal).filter_by(
+            project_id=project_id,
+        ).order_by(Signal.signal_id).all()
+        render_signal_flow_workbench(fragment_db, fragment_signals, project_id)
+    finally:
+        fragment_db.close()
+
+
 def page_relations():
-    st.title(t("🔄 功能间逻辑关系"))
+    st.title(t("🔄 功能与信号逻辑"))
     render_notify()
     db = get_session()
 
@@ -863,20 +1554,26 @@ def page_relations():
     logic_ops = ["AND", "OR"]
 
     try:
-        funcs = db.query(Function).order_by(Function.func_id).all()
+        funcs = db.query(Function).filter_by(project_id=current_project_id).order_by(Function.func_id).all()
         if len(funcs) < 2:
             st.warning(t("至少需要2个功能才能建立关系。"))
             return
 
         # 获取已有信号列表供条件编辑器用
-        all_signals = db.query(Signal).order_by(Signal.signal_id).all()
+        all_signals = db.query(Signal).filter_by(project_id=current_project_id).order_by(Signal.signal_id).all()
         signal_names = [s.name for s in all_signals]
 
-        tab_graph, tab_dbc, tab_add, tab_list, tab_sf = st.tabs(["📊 关系网络图", "📥 从数据库生成", "➕ 新增关系", "📋 关系列表", "📡 信号-功能"])
+        tab_flow, tab_graph, tab_dbc, tab_add, tab_list, tab_sf = st.tabs([
+            "🧭 信号数据流图", "📊 功能关系图", "📥 从数据库生成",
+            "➕ 新增关系", "📋 关系列表", "📡 信号-功能",
+        ])
+
+        with tab_flow:
+            render_signal_flow_fragment(current_project_id)
 
         # ========== 关系网络图 ==========
         with tab_graph:
-            rels = db.query(FuncRelation).all()
+            rels = db.query(FuncRelation).filter_by(project_id=current_project_id).all()
             if not rels:
                 st.info(t("暂无逻辑关系，请先添加。"))
             else:
@@ -901,51 +1598,39 @@ def page_relations():
             if not sigs:
                 st.warning(t("当前车型无信号数据，请先在DBC导入或Excel通讯矩阵中导入信号。"))
             else:
-                # 按报文分组，提取发送节点
-                import re
-                msg_groups = {}
-                for s in sigs:
-                    msg = s.message_name or t("未知报文")
-                    if msg not in msg_groups:
-                        # 从description提取发送节点
-                        sender = ""
-                        if s.description:
-                            m = re.search(rt('发送节点:\s*(\S+)'), s.description)
-                            if m:
-                                sender = m.group(1)
-                        msg_groups[msg] = {"sender": sender or (s.module or "?"), "signals": [], "msg_id": s.message_id or ""}
-                    msg_groups[msg]["signals"].append(s.name)
-
-                # 汇总ECU间关系
-                ecu_rels = {}
-                for msg_name, info in msg_groups.items():
-                    tx = info["sender"]
-                    if tx == "?" or not tx:
-                        continue
-                    if tx not in ecu_rels:
-                        ecu_rels[tx] = {}
-                    # 找到目标ECU：从功能管理中匹配
-                    ecu_list = get_config(db, "ecu_list", [])
-                    for ecu in ecu_list:
-                        if ecu != tx:
-                            ecu_rels[tx].setdefault(ecu, {"messages": [], "signals": []})
-                            ecu_rels[tx][ecu]["messages"].append(msg_name)
-                            ecu_rels[tx][ecu]["signals"].extend(info["signals"])
-
-                # 过滤有实际信号的关系
+                # 只使用规范化后的有效端点，禁止把报文广播给配置表中的所有ECU。
+                sync_signal_endpoints(db, current_project_id)
+                flow_endpoints = db.query(SignalEndpoint).filter_by(
+                    project_id=current_project_id,
+                    is_active=True,
+                ).all()
+                endpoint_map = {}
+                for endpoint in flow_endpoints:
+                    endpoint_map.setdefault(endpoint.signal_id, []).append(endpoint)
                 rel_summary = {}
-                for tx, targets in ecu_rels.items():
-                    for rx, data in targets.items():
-                        if data["signals"]:
+                for signal in sigs:
+                    rows = endpoint_map.get(signal.id, [])
+                    tx_nodes = {row.ecu_name for row in rows if row.endpoint_role == "Tx"}
+                    rx_nodes = {row.ecu_name for row in rows if row.endpoint_role == "Rx"}
+                    for tx in tx_nodes:
+                        for rx in rx_nodes:
+                            if not tx or not rx or tx == rx:
+                                continue
                             key = (tx, rx)
-                            rel_summary[key] = {
-                                "tx_ecu": tx, "rx_ecu": rx,
-                                "messages": data["messages"],
-                                "total_signals": len(data["signals"])
-                            }
+                            summary = rel_summary.setdefault(key, {
+                                "tx_ecu": tx,
+                                "rx_ecu": rx,
+                                "messages": set(),
+                                "signals": set(),
+                            })
+                            summary["messages"].add(signal.message_name or t("未知报文"))
+                            summary["signals"].add(signal.name)
+                for summary in rel_summary.values():
+                    summary["messages"] = sorted(summary["messages"])
+                    summary["total_signals"] = len(summary.pop("signals"))
 
                 if not rel_summary:
-                    st.info(t("未能提取到ECU间关系。请确保信号描述中包含「发送节点」信息。"))
+                    st.info(t("未能提取到ECU间关系。请检查信号是否具有有效发送和接收端点。"))
                 else:
                     st.metric(t("识别到的ECU关系"), len(rel_summary))
 
@@ -974,7 +1659,7 @@ def page_relations():
                             existing = db.query(FuncRelation).filter_by(
                                 project_id=current_project_id,
                                 source_id=src_func.id, target_id=tgt_func.id,
-                                rel_type=t("数据流")
+                                rel_type="数据流"
                             ).first()
                             if existing:
                                 skipped += 1
@@ -982,7 +1667,7 @@ def page_relations():
                             rel = FuncRelation(
                                 project_id=current_project_id,
                                 source_id=src_func.id, target_id=tgt_func.id,
-                                rel_type=t("数据流"),
+                                rel_type="数据流",
                                 description=f"[DB] {v['tx_ecu']}→{v['rx_ecu']}: {v['total_signals']}信号",
                                 conditions=json.dumps({"op": "AND", "items": []}, ensure_ascii=False)
                             )
@@ -1260,6 +1945,7 @@ def page_relations():
 
                     final_desc = f"{auto_desc}\n{rdesc}".strip() if rdesc else auto_desc
                     rel = FuncRelation(
+                        project_id=current_project_id,
                         source_id=src.id, target_id=tgt.id,
                         rel_type=rtype,
                         description=final_desc if final_desc else rdesc,
@@ -1280,7 +1966,7 @@ def page_relations():
 
         # ========== 关系列表 ==========
         with tab_list:
-            rels = db.query(FuncRelation).all()
+            rels = db.query(FuncRelation).filter_by(project_id=current_project_id).all()
             if not rels:
                 st.info(t("暂无逻辑关系。"))
             else:
@@ -1303,7 +1989,6 @@ def page_relations():
 
                 # 查看详情
                 with st.expander(t("🔍 查看关系详情")):
-                    detail_opts = {r.id: r for r in rels}
                     detail_sel = st.selectbox(t("选择关系"), rels,
                                               format_func=lambda r: f"{r.id}: {next((f.func_id for f in funcs if f.id == r.source_id), '?')} --{r.rel_type}--> {next((f.func_id for f in funcs if f.id == r.target_id), '?')}",
                                               key="detail_rel")
@@ -1314,7 +1999,7 @@ def page_relations():
                         st.markdown(f"关系类型: `{detail_sel.rel_type}`")
                         if detail_sel.conditions:
                             cond = json.loads(detail_sel.conditions)
-                            st.markdown(f"**条件表达式:**")
+                            st.markdown("**条件表达式:**")
                             st.code(condition_to_text(cond), language=None)
                             st.json(cond)
                         if detail_sel.description:
@@ -1602,15 +2287,15 @@ def page_traceability():
                 t("功能名称"): f.name,
                 t("功能域"): f.category or "-",
                 "ECU": f.module or "-",
-                t("输入信号数"): sum(1 for l in links if l.direction == "Input"),
-                t("输出信号数"): sum(1 for l in links if l.direction == "Output"),
-                t("反馈信号数"): sum(1 for l in links if l.direction == "Feedback"),
+                t("输入信号数"): sum(1 for link_item in links if link_item.direction == "Input"),
+                t("输出信号数"): sum(1 for link_item in links if link_item.direction == "Output"),
+                t("反馈信号数"): sum(1 for link_item in links if link_item.direction == "Feedback"),
                 t("总信号数"): len(links),
                 t("输入信号"): ", ".join(
-                    db.query(Signal).get(l.signal_id).name for l in links if l.direction == "Input"
+                    db.get(Signal, link_item.signal_id).name for link_item in links if link_item.direction == "Input"
                 ) or "-",
                 t("输出信号"): ", ".join(
-                    db.query(Signal).get(l.signal_id).name for l in links if l.direction == "Output"
+                    db.get(Signal, link_item.signal_id).name for link_item in links if link_item.direction == "Output"
                 ) or "-",
             }
             matrix_data.append(row)
@@ -1722,8 +2407,8 @@ def page_dbc_import():
             # 删除区域（保留在页面底部供随时使用）
             with st.expander(t("🗑️ 删除导入的数据")):
                 st.warning(t("⚠️ 以下操作不可恢复，请谨慎操作！"))
-                total_sigs = db.query(Signal).count()
-                total_rels = db.query(FuncRelation).count()
+                total_sigs = db.query(Signal).filter_by(project_id=current_project_id).count()
+                total_rels = db.query(FuncRelation).filter_by(project_id=current_project_id).count()
                 st.markdown(f"当前数据库共有 **{total_sigs}** 个信号，**{total_rels}** 条关系")
                 del_col1, del_col2 = st.columns(2)
                 with del_col1:
@@ -1736,8 +2421,10 @@ def page_dbc_import():
                         with c_a:
                             if st.button(t("✅ 确认删除"), key="btn_del_sig_confirm"):
                                 try:
-                                    db.query(FunctionSignal).delete()
-                                    db.query(Signal).delete()
+                                    signal_ids = db.query(Signal.id).filter_by(project_id=current_project_id)
+                                    db.query(FunctionSignal).filter(FunctionSignal.signal_id.in_(signal_ids)).delete(synchronize_session=False)
+                                    db.query(SignalFuncRelation).filter_by(project_id=current_project_id).delete()
+                                    db.query(Signal).filter_by(project_id=current_project_id).delete()
                                     db.commit()
                                     st.session_state.del_confirm_sig = False
                                     st.session_state.rel_notify = {"type": "success", "msg": t("✅ 已删除所有信号及关联关系")}
@@ -1759,7 +2446,7 @@ def page_dbc_import():
                         with c_a:
                             if st.button(t("✅ 确认删除"), key="btn_del_rel_confirm"):
                                 try:
-                                    db.query(FuncRelation).delete()
+                                    db.query(FuncRelation).filter_by(project_id=current_project_id).delete()
                                     db.commit()
                                     st.session_state.del_confirm_rel = False
                                     st.session_state.rel_notify = {"type": "success", "msg": t("✅ 已删除所有逻辑关系")}
@@ -1888,13 +2575,13 @@ def page_dbc_import():
                 if not import_list:
                     st.warning(t("没有要导入的信号"))
                 else:
-                    existing = db.query(Signal).all()
+                    existing = db.query(Signal).filter_by(project_id=current_project_id).all()
                     existing_nums = []
                     for s in existing:
                         if s.signal_id and s.signal_id.startswith(prefix):
                             try:
                                 existing_nums.append(int(s.signal_id.split("-")[-1]))
-                            except:
+                            except (ValueError, TypeError):
                                 pass
                     next_num = max(existing_nums) + 1 if existing_nums else 1
 
@@ -1904,7 +2591,7 @@ def page_dbc_import():
                     skipped = 0
 
                     for i, sig in enumerate(import_list):
-                        exists = db.query(Signal).filter_by(name=sig["signal_name"]).first()
+                        exists = db.query(Signal).filter_by(name=sig["signal_name"], project_id=current_project_id).first()
                         if exists:
                             skipped += 1
                             continue
@@ -1926,7 +2613,7 @@ def page_dbc_import():
                             unit=sig["unit"],
                             description=f"{sig['comment']}\n值描述: {sig['value_desc']}\n发送节点: {sig['senders']}",
                             cycle_time=sig["cycle_time"],
-                            module=target_ecu
+                            module=target_ecu, project_id=current_project_id
                         )
                         db.add(new_sig)
                         imported += 1
@@ -1941,14 +2628,14 @@ def page_dbc_import():
 
                     st.success(f"✅ 导入完成！新增 {imported} 个信号，跳过 {skipped} 个已存在信号")
                     st.balloons()
-                    st.info(f"💡 导入后可在「信号管理」页面查看和编辑，在「功能-信号关联」页面绑定到功能")
+                    st.info("💡 导入后可在「信号管理」页面查看和编辑，在「功能-信号关联」页面绑定到功能")
 
             # ===== 删除DBC导入数据 =====
             st.divider()
             with st.expander(t("🗑️ 删除导入的数据")):
                 st.warning(t("⚠️ 以下操作不可恢复，请谨慎操作！"))
-                total_sigs = db.query(Signal).count()
-                total_rels = db.query(FuncRelation).count()
+                total_sigs = db.query(Signal).filter_by(project_id=current_project_id).count()
+                total_rels = db.query(FuncRelation).filter_by(project_id=current_project_id).count()
                 st.markdown(f"当前数据库共有 **{total_sigs}** 个信号，**{total_rels}** 条关系")
 
                 del_col1, del_col2 = st.columns(2)
@@ -1962,8 +2649,10 @@ def page_dbc_import():
                         with c_a:
                             if st.button(t("✅ 确认删除"), key="btn_del_sig_confirm"):
                                 try:
-                                    db.query(FunctionSignal).delete()
-                                    db.query(Signal).delete()
+                                    signal_ids = db.query(Signal.id).filter_by(project_id=current_project_id)
+                                    db.query(FunctionSignal).filter(FunctionSignal.signal_id.in_(signal_ids)).delete(synchronize_session=False)
+                                    db.query(SignalFuncRelation).filter_by(project_id=current_project_id).delete()
+                                    db.query(Signal).filter_by(project_id=current_project_id).delete()
                                     db.commit()
                                     st.session_state.del_confirm_sig = False
                                     st.session_state.rel_notify = {"type": "success", "msg": t("✅ 已删除所有信号及关联关系")}
@@ -1985,7 +2674,7 @@ def page_dbc_import():
                         with c_a:
                             if st.button(t("✅ 确认删除"), key="btn_del_rel_confirm"):
                                 try:
-                                    db.query(FuncRelation).delete()
+                                    db.query(FuncRelation).filter_by(project_id=current_project_id).delete()
                                     db.commit()
                                     st.session_state.del_confirm_rel = False
                                     st.session_state.rel_notify = {"type": "success", "msg": t("✅ 已删除所有逻辑关系")}
@@ -2052,13 +2741,13 @@ def page_export():
         links = db.query(FunctionSignal).join(Function).filter(Function.project_id == current_project_id).all()
         if links:
             rows = []
-            for l in links:
-                f = db.query(Function).get(l.function_id)
-                s = db.query(Signal).get(l.signal_id)
+            for link_item in links:
+                f = db.get(Function, link_item.function_id)
+                s = db.get(Signal, link_item.signal_id)
                 rows.append({
                     t("功能编号"): f.func_id, t("功能名称"): f.name,
                     t("信号编号"): s.signal_id, t("信号名称"): s.name,
-                    t("方向"): l.direction, t("用途"): l.usage_desc, t("必需"): l.is_required
+                    t("方向"): link_item.direction, t("用途"): link_item.usage_desc, t("必需"): link_item.is_required
                 })
             df_l = pd.DataFrame(rows)
             st.subheader(t("🔗 关联清单"))
@@ -2282,6 +2971,9 @@ def page_project():
                         # 用当前session重新获取目标
                         target = db.query(Project).get(deleted_id)
                         # 删除关联数据
+                        db.query(Project).filter_by(base_project_id=deleted_id).update({Project.base_project_id: None})
+                        db.query(TraceLink).filter_by(project_id=deleted_id).delete()
+                        db.query(SignalFuncRelation).filter_by(project_id=deleted_id).delete()
                         db.query(FuncRelation).filter_by(project_id=deleted_id).delete()
                         db.query(FunctionSignal).filter(FunctionSignal.function_id.in_(
                             db.query(Function.id).filter_by(project_id=deleted_id)
@@ -2822,14 +3514,14 @@ new vis.Network(document.getElementById('g'),{{nodes:nodes,edges:edges}},{{physi
                                     existing = db.query(FuncRelation).filter_by(
                                         project_id=current_project_id,
                                         source_id=src_func.id, target_id=tgt_func.id,
-                                        rel_type=t("数据流")
+                                        rel_type="数据流"
                                     ).first()
                                     if not existing:
                                         sorted_sigs = sorted(sig_set)
                                         rel = FuncRelation(
                                             project_id=current_project_id,
                                             source_id=src_func.id, target_id=tgt_func.id,
-                                            rel_type=t("数据流"),
+                                            rel_type="数据流",
                                             description=f"[Excel] {tx}→{rx}: {len(sorted_sigs)}信号({', '.join(sorted_sigs[:5])})",
                                             conditions=json.dumps({"op": "AND", "items": [
                                                 {"type": "cond", "signal": s, "op": "==", "value": "1", "unit": "", "ecu": tx}
@@ -2873,8 +3565,8 @@ new vis.Network(document.getElementById('g'),{{nodes:nodes,edges:edges}},{{physi
                 st.divider()
                 with st.expander(t("🗑️ 删除导入的数据")):
                     st.warning(t("⚠️ 以下操作不可恢复，请谨慎操作！"))
-                    total_sigs = db.query(Signal).count()
-                    total_rels = db.query(FuncRelation).count()
+                    total_sigs = db.query(Signal).filter_by(project_id=current_project_id).count()
+                    total_rels = db.query(FuncRelation).filter_by(project_id=current_project_id).count()
                     st.markdown(f"当前数据库共有 **{total_sigs}** 个信号，**{total_rels}** 条关系")
 
                     del_col1, del_col2 = st.columns(2)
@@ -2888,8 +3580,10 @@ new vis.Network(document.getElementById('g'),{{nodes:nodes,edges:edges}},{{physi
                             with c_a:
                                 if st.button(t("✅ 确认删除"), key="btn_excel_del_sig_ok"):
                                     try:
-                                        db.query(FunctionSignal).delete()
-                                        db.query(Signal).delete()
+                                        signal_ids = db.query(Signal.id).filter_by(project_id=current_project_id)
+                                        db.query(FunctionSignal).filter(FunctionSignal.signal_id.in_(signal_ids)).delete(synchronize_session=False)
+                                        db.query(SignalFuncRelation).filter_by(project_id=current_project_id).delete()
+                                        db.query(Signal).filter_by(project_id=current_project_id).delete()
                                         db.commit()
                                         st.session_state.del_confirm_sig = False
                                         st.session_state.rel_notify = {
@@ -2915,7 +3609,7 @@ new vis.Network(document.getElementById('g'),{{nodes:nodes,edges:edges}},{{physi
                             with c_a:
                                 if st.button(t("✅ 确认删除"), key="btn_excel_del_rel_ok"):
                                     try:
-                                        db.query(FuncRelation).delete()
+                                        db.query(FuncRelation).filter_by(project_id=current_project_id).delete()
                                         db.commit()
                                         st.session_state.del_confirm_rel = False
                                         st.session_state.rel_notify = {
@@ -2936,14 +3630,18 @@ new vis.Network(document.getElementById('g'),{{nodes:nodes,edges:edges}},{{physi
 
 # ========== 页面路由 ==========
 PAGES = {
-    "📊 总览仪表盘": page_dashboard,
+    "▦ 工程总览": page_dashboard,
+    "▤ 需求规范": lambda: page_requirements(current_project_id),
+    "⌁ 需求追溯": lambda: page_requirement_traceability(current_project_id),
+    "◆ 基线与变更": lambda: page_baselines(current_project_id),
+    "▣ 知识与评审": lambda: page_requirements_knowledge(current_project_id),
     "📋 功能管理": page_functions,
+    "🔄 功能逻辑": page_relations,
     "📡 信号管理": page_signals,
     "📥 DBC导入": page_dbc_import,
     "📥 Excel通讯矩阵": page_excel_import,
     "🔗 功能-信号关联": page_func_signal,
-    "🔄 逻辑关系": page_relations,
-    "📊 追溯矩阵": page_traceability,
+    "📊 接口追溯矩阵": page_traceability,
     "📤 数据导出": page_export,
     "🚘 车型管理": page_project,
     "⚙️ 配置管理": page_config,
