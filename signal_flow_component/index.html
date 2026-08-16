@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {
+      --ink: #e8edf2;
+      --muted: #8796a5;
+      --panel: #18242d;
+      --panel-2: #21313b;
+      --grid: rgba(130, 160, 175, .09);
+      --orange: #ff6b35;
+      --cyan: #27d3c2;
+      --yellow: #ffd166;
+      --red: #ff5d5d;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: transparent; font-family: "Bahnschrift", "Microsoft YaHei UI", sans-serif; color: var(--ink); }
+    .shell { border: 1px solid #2a3c48; background: #101a21; box-shadow: inset 0 0 0 1px rgba(255,255,255,.02); }
+    .toolbar { min-height: 54px; display: flex; align-items: center; gap: 14px; padding: 8px 16px; border-bottom: 1px solid #2a3c48; background: #142129; }
+    .eyebrow { color: var(--orange); letter-spacing: .16em; font-size: 11px; font-weight: 700; }
+    .title { font-size: 15px; font-weight: 700; }
+    .badge { padding: 5px 9px; border: 1px solid #38505e; color: #9fb0bb; font-size: 11px; white-space: nowrap; }
+    .hint { color: var(--muted); font-size: 11px; }
+    .toolbar-spacer { margin-left: auto; }
+    .legend { display: flex; gap: 9px; color: #8496a2; font-size: 10px; white-space: nowrap; }
+    .legend i { display: inline-block; width: 14px; height: 2px; margin: 0 4px 3px 0; background: var(--orange); }
+    .legend i.manual { background: var(--cyan); }
+    .toolbar-action { border: 1px solid #3a515e; background: #1b2a33; color: #c9d3d9; padding: 5px 9px; font: 700 10px "Bahnschrift"; cursor: pointer; }
+    .toolbar-action:hover { border-color: var(--cyan); color: #fff; }
+    .viewport { overflow: auto; height: 646px; overscroll-behavior: contain; scrollbar-gutter: stable; background-color: #111c23; background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 24px 24px; }
+    :fullscreen body, :fullscreen #root, :fullscreen .shell { width: 100%; height: 100%; }
+    :fullscreen .shell { border: 0; display: flex; flex-direction: column; }
+    :fullscreen .viewport { flex: 1; height: auto !important; max-height: none; }
+    :fullscreen .toolbar { flex: 0 0 auto; }
+    @media (max-width: 900px) {
+      .toolbar { gap: 8px; padding: 8px 10px; flex-wrap: wrap; }
+      .hint, .legend { display: none; }
+      .title { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .toolbar-spacer { flex: 1; }
+    }
+    svg { display: block; min-width: 100%; user-select: none; }
+    .lane-title { fill: #69808e; font-size: 11px; letter-spacing: .18em; font-weight: 700; }
+    .lane-rule { stroke: #2c3d48; stroke-width: 1; stroke-dasharray: 5 7; }
+    .node { fill: var(--panel); stroke: #3b505d; stroke-width: 1.2; rx: 3; }
+    .node:hover { stroke: #738b98; stroke-width: 1.8; }
+    .node.selected, .node.selected:hover {
+      fill: #17343a;
+      stroke: var(--cyan);
+      stroke-width: 2.7;
+      filter: drop-shadow(0 0 5px rgba(39, 211, 194, .28));
+    }
+    .node-signal { fill: #202d36; cursor: pointer; }
+    .node-message { fill: #1b2b33; stroke: var(--orange); stroke-width: 1.5; cursor: pointer; }
+    .node-rx.drop-target { fill: #163d3c; stroke: var(--cyan); stroke-width: 2.5; }
+    .node-code { fill: #fff; font-size: 12px; font-weight: 700; pointer-events: none; }
+    .node-name { fill: #9fb0bb; font-size: 11px; pointer-events: none; }
+    .node-meta { fill: #718491; font-size: 10px; pointer-events: none; }
+    .flow { fill: none; stroke: var(--orange); stroke-width: 1.8; opacity: .76; }
+    .flow.override { stroke: var(--cyan); stroke-width: 2.3; }
+    .flow.unallocated { stroke: var(--yellow); stroke-dasharray: 6 5; }
+    .flow-hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+    .endpoint { fill: #111c23; stroke: var(--orange); stroke-width: 3; cursor: grab; }
+    .endpoint.override { stroke: var(--cyan); }
+    .endpoint:active { cursor: grabbing; }
+    .branch-handle { fill: #163d3c; stroke: var(--cyan); stroke-width: 2.5; cursor: crosshair; }
+    .branch-plus { fill: var(--cyan); font-size: 15px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+    .drag-line { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-dasharray: 7 5; pointer-events: none; }
+    .count-pill { fill: #263943; stroke: #405762; }
+    .count-text { fill: var(--yellow); font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; }
+    .empty { color: #8294a0; padding: 90px 30px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const send = (type, extra = {}) => window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
+    const setHeight = (height) => send("streamlit:setFrameHeight", { height });
+    const setValue = (value) => send("streamlit:setComponentValue", { value, dataType: "json" });
+    const ready = () => send("streamlit:componentReady", { apiVersion: 1 });
+    const esc = (value) => String(value ?? "").replace(/[&<>\"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+    const clip = (value, max = 32) => String(value ?? "").length > max ? String(value).slice(0, max - 1) + "…" : String(value ?? "");
+    const nonce = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+    let currentArgs = null;
+    let drag = null;
+    let scrollSaveFrame = null;
+
+    function viewportSnapshot() {
+      const viewport = document.querySelector(".viewport");
+      return viewport ? { left: viewport.scrollLeft, top: viewport.scrollTop } : { left: 0, top: 0 };
+    }
+
+    function storageKey(args = currentArgs) {
+      return `ee-req-flow:${args?.viewStateKey || "default"}`;
+    }
+
+    function saveViewport() {
+      try { sessionStorage.setItem(storageKey(), JSON.stringify(viewportSnapshot())); } catch (_) {}
+    }
+
+    function storedViewport(args) {
+      try { return JSON.parse(sessionStorage.getItem(storageKey(args)) || "null"); } catch (_) { return null; }
+    }
+
+    function eventValue(value) {
+      saveViewport();
+      setValue({ ...value, viewport: viewportSnapshot() });
+    }
+
+    function adaptiveFrameHeight() {
+      const available = Number(window.screen?.availHeight || 900);
+      return Math.max(560, Math.min(860, Math.round(available * .76)));
+    }
+
+    function sizeCanvas() {
+      const viewport = document.querySelector(".viewport");
+      if (!viewport || document.fullscreenElement) return;
+      const frameHeight = adaptiveFrameHeight();
+      viewport.style.height = `${frameHeight - 58}px`;
+      setHeight(frameHeight);
+    }
+
+    async function toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch (_) {}
+    }
+
+    function path(x1, y1, x2, y2) {
+      if (currentArgs?.lineStyle === "orthogonal") {
+        const middle = (x1 + x2) / 2;
+        return `M ${x1} ${y1} H ${middle} V ${y2} H ${x2}`;
+      }
+      const bend = Math.max(70, Math.abs(x2 - x1) * .48);
+      return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+    }
+
+    function aggregateSvg(message, signals, candidates) {
+      const tx = message.tx || "未分配发送节点";
+      const receivers = [...new Set(signals.flatMap(s => (s.receivers || []).map(r => r.ecu)))];
+      const visibleRx = candidates.filter(x => receivers.includes(x));
+      const targets = visibleRx.length ? visibleRx : ["未分配接收节点"];
+      const height = Math.max(480, targets.length * 88 + 150);
+      const txY = height / 2 - 35;
+      const msgY = height / 2 - 42;
+      let edges = "";
+      let rxNodes = "";
+      targets.forEach((ecu, index) => {
+        const y = 95 + index * ((height - 190) / Math.max(1, targets.length - 1 || 1));
+        const count = signals.filter(s => (s.receivers || []).some(r => r.ecu === ecu)).length;
+        edges += `<path class="flow ${ecu.startsWith("未分配") ? "unallocated" : ""}" d="${path(690, msgY + 42, 950, y)}" marker-end="url(#arrow-orange)"/>`;
+        rxNodes += `<g><rect class="node node-rx" x="950" y="${y - 30}" width="210" height="60"/><text class="node-code" x="968" y="${y - 5}">${esc(clip(ecu, 24))}</text><text class="node-meta" x="968" y="${y + 14}">RX · ${count} SIGNALS</text></g>`;
+      });
+      return `<svg viewBox="0 0 1200 ${height}" width="100%" height="${height}">
+        ${defs()}
+        ${lanes(height)}
+        <path class="flow" d="${path(230, txY + 35, 380, msgY + 42)}" marker-end="url(#arrow-orange)"/>
+        ${edges}
+        <g><rect class="node" x="40" y="${txY}" width="190" height="70"/><text class="node-code" x="58" y="${txY + 29}">${esc(clip(tx, 20))}</text><text class="node-meta" x="58" y="${txY + 49}">TRANSMITTER</text></g>
+        <g class="message-node"><rect class="node node-message" x="380" y="${msgY}" width="310" height="84"/><text class="node-code" x="400" y="${msgY + 28}">${esc(clip(message.name, 34))}</text><text class="node-name" x="400" y="${msgY + 49}">${esc(message.id || "—")} · ${signals.length} signals · ${esc(message.bus || "—")}</text><text class="node-meta" x="400" y="${msgY + 68}">点击上方“信号明细”进入端点编辑</text></g>
+        ${rxNodes}
+      </svg>`;
+    }
+
+    function detailSvg(message, signals, candidates) {
+      const tx = message.tx || "未分配发送节点";
+      const actual = [...new Set(signals.flatMap(s => (s.receivers || []).map(r => r.ecu)))];
+      let receivers = [...new Set([...actual, ...candidates])].filter(Boolean);
+      if (!receivers.length) receivers = ["未分配接收节点"];
+      const step = currentArgs?.compact ? 50 : 62;
+      const signalHeight = currentArgs?.compact ? 38 : 46;
+      const height = Math.max(520, signals.length * step + 150, receivers.length * 76 + 150);
+      const txY = height / 2 - 35;
+      const rxStep = (height - 180) / Math.max(1, receivers.length - 1 || 1);
+      const rxPos = Object.fromEntries(receivers.map((ecu, index) => [ecu, 90 + index * rxStep]));
+      let signalNodes = "";
+      let edges = "";
+      let rxNodes = "";
+      signals.forEach((signal, index) => {
+        const y = 88 + index * step;
+        const centerY = y + signalHeight / 2;
+        const selected = Number(currentArgs?.selectedSignalId) === Number(signal.id) ? "selected" : "";
+        const receiverCount = (signal.receivers || []).length;
+        signalNodes += `<g class="signal-node" data-signal-id="${signal.id}"><title>${esc(signal.signal_id)} · ${esc(signal.name)} · ${receiverCount} 个接收端点</title><rect class="node node-signal ${selected}" x="330" y="${y}" width="390" height="${signalHeight}"/><text class="node-code" x="346" y="${y + 17}">${esc(clip(signal.name, 34))}</text><text class="node-meta" x="346" y="${y + 32}">${esc(signal.signal_id)} · ${signal.start_bit ?? "?"}|${signal.bit_length ?? "?"} · ${esc(signal.unit || "—")}</text><text class="node-meta" x="666" y="${centerY + 4}" text-anchor="end">RX ${receiverCount}</text><circle class="branch-handle" data-drag-kind="add" data-signal-id="${signal.id}" cx="738" cy="${centerY}" r="9"><title>拖动到 ECU：新增接收分支</title></circle><text class="branch-plus" x="738" y="${centerY + 1}">+</text></g>`;
+        edges += `<path class="flow" d="${path(230, txY + 35, 330, centerY)}"/>`;
+        const endpoints = (signal.receivers || []).length ? signal.receivers : [{ endpoint_id: null, ecu: "未分配接收节点", is_override: false }];
+        endpoints.forEach(endpoint => {
+          const rxY = rxPos[endpoint.ecu] ?? 90;
+          const css = endpoint.is_override ? "override" : "";
+          const edgeId = `edge-${signal.id}-${endpoint.endpoint_id ?? "none"}`;
+          const d = path(720, centerY, 950, rxY);
+          const marker = endpoint.is_override ? "arrow-cyan" : "arrow-orange";
+          edges += `<path class="flow ${css}" d="${d}" marker-end="url(#${marker})"/><path class="flow-hit" data-signal-id="${signal.id}" d="${d}"/><circle id="${edgeId}" class="endpoint ${css}" data-drag-kind="move" data-signal-id="${signal.id}" data-endpoint-id="${endpoint.endpoint_id ?? ""}" data-old-ecu="${esc(endpoint.ecu)}" cx="944" cy="${rxY}" r="7"><title>拖动：移动这一条接收连接</title></circle>`;
+        });
+      });
+      receivers.forEach(ecu => {
+        const y = rxPos[ecu];
+        const sourceCount = signals.reduce((n, s) => n + (s.receivers || []).filter(r => r.ecu === ecu).length, 0);
+        rxNodes += `<g class="rx-node" data-ecu="${esc(ecu)}"><rect class="node node-rx" x="950" y="${y - 29}" width="210" height="58"/><text class="node-code" x="968" y="${y - 5}">${esc(clip(ecu, 23))}</text><text class="node-meta" x="968" y="${y + 14}">RX · ${sourceCount} ENDPOINTS</text></g>`;
+      });
+      return `<svg viewBox="0 0 1200 ${height}" width="100%" height="${height}">
+        ${defs()}${lanes(height)}${edges}
+        <g><rect class="node" x="40" y="${txY}" width="190" height="70"/><text class="node-code" x="58" y="${txY + 29}">${esc(clip(tx, 20))}</text><text class="node-meta" x="58" y="${txY + 49}">TRANSMITTER</text></g>
+        ${signalNodes}${rxNodes}
+      </svg>`;
+    }
+
+    function defs() {
+      return `<defs><marker id="arrow-orange" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#ff6b35"/></marker><marker id="arrow-cyan" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#27d3c2"/></marker></defs>`;
+    }
+    function lanes(height) {
+      return `<text class="lane-title" x="40" y="38">SOURCE ECU</text><text class="lane-title" x="330" y="38">${currentArgs.mode === "aggregate" ? "CAN MESSAGE" : "SIGNALS"}</text><text class="lane-title" x="950" y="38">RECEIVER ECU</text><line class="lane-rule" x1="270" y1="55" x2="270" y2="${height-25}"/><line class="lane-rule" x1="850" y1="55" x2="850" y2="${height-25}"/>`;
+    }
+
+    function render(args) {
+      currentArgs = args;
+      const root = document.getElementById("root");
+      const signals = args.signals || [];
+      if (!signals.length) {
+        root.innerHTML = `<div class="shell"><div class="empty">当前筛选条件下没有信号数据</div></div>`;
+        setHeight(260); return;
+      }
+      const label = args.mode === "aggregate" ? "MESSAGE AGGREGATE" : "SIGNAL ENDPOINT EDIT";
+      const existingViewport = document.querySelector(".viewport");
+      const liveViewport = viewportSnapshot();
+      const restoredViewport = existingViewport
+        ? liveViewport
+        : (args.viewportState?.top != null ? args.viewportState : storedViewport(args));
+      root.innerHTML = `<div class="shell"><div class="toolbar"><div><div class="eyebrow">${label}</div><div class="title">${esc(args.message?.name || "未命名报文")}</div></div><div class="hint">${args.mode === "detail" ? "+ 拖到 ECU 新增分支；末端圆点拖动现有连接" : "按报文聚合展示真实有效端点"}</div><div class="toolbar-spacer"></div><div class="legend"><span><i></i>DBC</span><span><i class="manual"></i>项目变更</span></div><button class="toolbar-action" id="toggle-fullscreen" type="button">全屏</button><button class="toolbar-action" id="export-png" type="button">PNG</button><div class="badge">${signals.length} SIGNALS</div></div><div class="viewport">${args.mode === "aggregate" ? aggregateSvg(args.message || {}, signals, args.ecuCandidates || []) : detailSvg(args.message || {}, signals, args.ecuCandidates || [])}</div></div>`;
+      bindEvents();
+      document.getElementById("export-png")?.addEventListener("click", exportPng);
+      document.getElementById("toggle-fullscreen")?.addEventListener("click", toggleFullscreen);
+      const viewport = document.querySelector(".viewport");
+      viewport?.addEventListener("scroll", () => {
+        cancelAnimationFrame(scrollSaveFrame);
+        scrollSaveFrame = requestAnimationFrame(saveViewport);
+      }, { passive: true });
+      requestAnimationFrame(() => {
+        if (restoredViewport) {
+          viewport.scrollLeft = Number(restoredViewport.left || 0);
+          viewport.scrollTop = Number(restoredViewport.top || 0);
+        }
+        sizeCanvas();
+      });
+    }
+
+    function bindEvents() {
+      document.querySelectorAll(".signal-node, .flow-hit").forEach(el => el.addEventListener("click", () => {
+        const id = Number(el.dataset.signalId);
+        // Give immediate feedback while Streamlit synchronizes the selection.
+        // Only the clicked row may keep the selected style.
+        document.querySelectorAll(".node-signal.selected").forEach(node => node.classList.remove("selected"));
+        document.querySelector(`.signal-node[data-signal-id="${id}"] .node-signal`)?.classList.add("selected");
+        eventValue({ action: "select_signal", signal_id: id, nonce: nonce() });
+      }));
+      document.querySelectorAll(".endpoint[data-endpoint-id]:not([data-endpoint-id='']), .branch-handle").forEach(el => el.addEventListener("pointerdown", startDrag));
+    }
+
+    function startDrag(event) {
+      event.preventDefault(); event.stopPropagation();
+      const circle = event.currentTarget;
+      const svg = circle.ownerSVGElement;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      line.setAttribute("class", "drag-line");
+      svg.appendChild(line);
+      drag = { circle, svg, line, kind: circle.dataset.dragKind, startX: Number(circle.getAttribute("cx")), startY: Number(circle.getAttribute("cy")) };
+      circle.setPointerCapture(event.pointerId);
+      circle.addEventListener("pointermove", moveDrag);
+      circle.addEventListener("pointerup", endDrag, { once: true });
+      circle.addEventListener("pointercancel", cancelDrag, { once: true });
+    }
+
+    function svgPoint(event) {
+      const point = drag.svg.createSVGPoint(); point.x = event.clientX; point.y = event.clientY;
+      return point.matrixTransform(drag.svg.getScreenCTM().inverse());
+    }
+    function moveDrag(event) {
+      const p = svgPoint(event);
+      drag.line.setAttribute("d", path(drag.startX, drag.startY, p.x, p.y));
+      document.querySelectorAll(".node-rx.drop-target").forEach(x => x.classList.remove("drop-target"));
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.(".rx-node");
+      target?.querySelector(".node-rx")?.classList.add("drop-target");
+    }
+    function endDrag(event) {
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.(".rx-node");
+      const endpoint = drag.circle;
+      cleanupDrag();
+      if (!target) return;
+      const newEcu = target.dataset.ecu;
+      const oldEcu = endpoint.dataset.oldEcu;
+      if (!newEcu || newEcu.startsWith("未分配")) return;
+      if (endpoint.dataset.dragKind === "add") {
+        const signal = (currentArgs.signals || []).find(item => Number(item.id) === Number(endpoint.dataset.signalId));
+        if ((signal?.receivers || []).some(receiver => receiver.ecu === newEcu)) return;
+        eventValue({ action: "add_receiver", signal_id: Number(endpoint.dataset.signalId), new_ecu: newEcu, nonce: nonce() });
+      } else {
+        if (newEcu === oldEcu) return;
+        eventValue({ action: "move_receiver", signal_id: Number(endpoint.dataset.signalId), endpoint_id: Number(endpoint.dataset.endpointId), old_ecu: oldEcu, new_ecu: newEcu, nonce: nonce() });
+      }
+    }
+    function cancelDrag() { cleanupDrag(); }
+    function cleanupDrag() {
+      if (!drag) return;
+      drag.line.remove();
+      document.querySelectorAll(".node-rx.drop-target").forEach(x => x.classList.remove("drop-target"));
+      drag = null;
+    }
+
+    function exportPng() {
+      const sourceSvg = document.querySelector(".viewport svg");
+      if (!sourceSvg) return;
+      const clone = sourceSvg.cloneNode(true);
+      const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+      style.textContent = document.querySelector("style")?.textContent || "";
+      clone.insertBefore(style, clone.firstChild);
+      const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      background.setAttribute("width", "100%"); background.setAttribute("height", "100%"); background.setAttribute("fill", "#111c23");
+      clone.insertBefore(background, clone.firstChild);
+      const viewBox = sourceSvg.viewBox.baseVal;
+      const canvas = document.createElement("canvas");
+      canvas.width = viewBox.width * 2; canvas.height = viewBox.height * 2;
+      const context = canvas.getContext("2d"); context.scale(2, 2);
+      const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob); const image = new Image();
+      image.onload = () => {
+        context.drawImage(image, 0, 0, viewBox.width, viewBox.height);
+        URL.revokeObjectURL(url);
+        const link = document.createElement("a");
+        link.download = `${currentArgs.message?.name || "signal-flow"}.png`;
+        link.href = canvas.toDataURL("image/png"); link.click();
+      };
+      image.src = url;
+    }
+
+    window.addEventListener("message", event => {
+      if (event.data?.type === "streamlit:render") render(event.data.args || {});
+    });
+    window.addEventListener("resize", sizeCanvas);
+    document.addEventListener("fullscreenchange", () => {
+      const button = document.getElementById("toggle-fullscreen");
+      if (button) button.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
+      if (!document.fullscreenElement) requestAnimationFrame(sizeCanvas);
+    });
+    ready();
+  </script>
+</body>
+</html>

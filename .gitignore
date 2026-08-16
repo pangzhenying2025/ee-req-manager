@@ -5,6 +5,10 @@ __pycache__/
 # Database (contains user data, not for version control)
 *.db
 *.db-journal
+*.db.pre_v04_backup
+*.db-shm
+*.db-wal
+backups/
 
 # IDE
 .vscode/
@@ -20,10 +24,13 @@ Thumbs.db
 *.tmp
 *.bkp
 _build/
+.pytest_cache/
+.ruff_cache/
+.venv/
 
 # User documents (not for repo)
 *.docx
+*.xlsx
 *.png
 *.txt
 !requirements.txt
-启动.bat
