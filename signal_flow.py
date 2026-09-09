@@ -368,7 +368,11 @@ def effective_ecus(endpoints: Iterable[SignalEndpoint]) -> list[str]:
     return sorted({row.ecu_name for row in endpoints if row.is_active and row.ecu_name})
 
 
-_COMPONENT_DIR = Path(__file__).with_name("signal_flow_component")
+_COMPONENT_ROOT = Path(__file__).with_name("signal_flow_component")
+_COMPONENT_DIR = _COMPONENT_ROOT / "dist"
+if not (_COMPONENT_DIR / "index.html").exists():
+    # Development fallback keeps source checkouts diagnosable before npm build.
+    _COMPONENT_DIR = _COMPONENT_ROOT
 _signal_flow_editor = components.declare_component(
     "ee_req_signal_flow_editor",
     path=str(_COMPONENT_DIR),

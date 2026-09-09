@@ -27,6 +27,7 @@ _build/
 .pytest_cache/
 .ruff_cache/
 .venv/
+node_modules/
 
 # User documents (not for repo)
 *.docx

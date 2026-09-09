@@ -52,6 +52,7 @@
 - 功能—信号绑定和功能逻辑关系图
 - DOORS 风格的可编辑信号数据流画布：报文聚合、一个信号多接收 ECU、新增/移动/删除/恢复端点、变更审计和 PNG 导出
 - DBC 文件与 Excel 通讯矩阵导入
+- 基于 canmatrix 的通信矩阵版本比较（精度、偏移、字节序、收发节点等字段级差异）
 - 多车型项目、基础车型借用和数据隔离
 - CSV 数据导出
 
@@ -119,8 +120,12 @@ python -m unittest discover -s tests -v
 - SQLite + SQLAlchemy
 - Pandas
 - cantools
+- canmatrix
 - openpyxl
-- vis-network
+- React Flow + ELK（信号数据流画布）
+- vis-network（现有功能关系和 Excel 预览图，后续迁移）
+
+技术路线、分阶段边界见 [开源技术路线](docs/open_source_roadmap.md)，第三方许可见 [Third-party notices](THIRD_PARTY_NOTICES.md)。
 
 ## License
 
