@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["signal_flow_component/dist", "signal_flow_component/node_modules"]
+
+[tool.ruff.lint]
+# Establish a clean gate now; tighten style rules as legacy modules are migrated.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_*.py" = ["E402"]

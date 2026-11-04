@@ -27,6 +27,9 @@ _build/
 .pytest_cache/
 .ruff_cache/
 .venv/
+node_modules/
+.dev/
+test-results/
 
 # User documents (not for repo)
 *.docx
@@ -34,3 +37,4 @@ _build/
 *.png
 *.txt
 !requirements.txt
+!requirements-dev.txt

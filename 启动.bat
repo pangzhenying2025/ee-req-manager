@@ -10,7 +10,7 @@ where uv >nul 2>nul
 if errorlevel 1 goto no_uv
 uv venv .venv --python 3.11
 if errorlevel 1 goto install_failed
-uv pip install --python "%APP_PYTHON%" -r requirements.txt
+uv pip install --python "%APP_PYTHON%" -r requirements.lock
 if errorlevel 1 goto install_failed
 
 :ready

@@ -71,6 +71,24 @@ def render_presence(project_id: int, page_name: str) -> None:
         db.close()
 
 
+def _acquire_edit_lock(project_id, artifact_type, artifact_id, session_id, user_name, key):
+    with SessionLocal() as db:
+        result = acquire_lock(
+            db, project_id=project_id, artifact_type=artifact_type,
+            artifact_id=artifact_id, session_id=session_id, user_name=user_name,
+        )
+        if not result.acquired:
+            st.session_state[f"{key}_notice"] = f"编辑权刚刚被「{result.owner_name}」取得，请稍后再试。"
+
+
+def _release_edit_lock(project_id, artifact_type, artifact_id, session_id):
+    with SessionLocal() as db:
+        release_lock(
+            db, project_id=project_id, artifact_type=artifact_type,
+            artifact_id=artifact_id, session_id=session_id,
+        )
+
+
 def render_edit_lock(
     *,
     project_id: int,
@@ -93,6 +111,9 @@ def render_edit_lock(
             artifact_id=artifact_id,
         )
         key = f"lock_{project_id}_{artifact_type}_{artifact_id}"
+        notice = st.session_state.pop(f"{key}_notice", None)
+        if notice:
+            st.warning(notice)
         if row is not None and row.session_id == session_id:
             owns_lock(
                 db,
@@ -104,15 +125,11 @@ def render_edit_lock(
             )
             c1, c2 = st.columns([4, 1])
             c1.success(f"你正在编辑：{artifact_label}（编辑权保留 5 分钟）")
-            if c2.button("释放", key=f"release_{key}", use_container_width=True):
-                release_lock(
-                    db,
-                    project_id=project_id,
-                    artifact_type=artifact_type,
-                    artifact_id=artifact_id,
-                    session_id=session_id,
-                )
-                st.rerun()
+            c2.button(
+                "释放", key=f"release_{key}", use_container_width=True,
+                on_click=_release_edit_lock,
+                args=(project_id, artifact_type, artifact_id, session_id),
+            )
             return True
         if row is not None:
             st.warning(
@@ -120,21 +137,12 @@ def render_edit_lock(
                 "你目前只能查看，编辑权超时后会自动释放。"
             )
             return False
-        if st.button("开始编辑", type="primary", key=f"acquire_{key}"):
-            result = acquire_lock(
-                db,
-                project_id=project_id,
-                artifact_type=artifact_type,
-                artifact_id=artifact_id,
-                session_id=session_id,
-                user_name=user_name,
-            )
-            if result.acquired:
-                st.rerun()
-            else:
-                st.warning(f"编辑权刚刚被「{result.owner_name}」取得，请稍后再试。")
-        else:
-            st.info("点击“开始编辑”取得编辑权；其他在线成员仍可查看，但不能同时覆盖该对象。")
+        st.button(
+            "开始编辑", type="primary", key=f"acquire_{key}",
+            on_click=_acquire_edit_lock,
+            args=(project_id, artifact_type, artifact_id, session_id, user_name, key),
+        )
+        st.info("点击“开始编辑”取得编辑权；其他在线成员仍可查看，但不能同时覆盖该对象。")
         return False
     finally:
         db.close()

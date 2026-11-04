@@ -62,13 +62,19 @@ with sync_playwright() as playwright:
     receiver_heading = page.get_by_text(re.compile(r"^接收端点 · \d+$")).first
     initial_receiver_count = int(receiver_heading.inner_text().rsplit(" ", 1)[-1])
 
+    acquire = page.get_by_role("button", name="开始编辑")
+    if acquire.count() and acquire.first.is_visible():
+        acquire.first.click()
+        page.wait_for_timeout(1000)
+        component_frame = current_component_frame(page)
+
     endpoint = component_frame.locator(".endpoint[data-endpoint-id]:not([data-endpoint-id=''])").first
     old_ecu = endpoint.get_attribute("data-old-ecu")
     save_latency_ms = float("nan")
     page.get_by_text("新增原因 *", exact=True).wait_for(timeout=10000)
     page.get_by_label("新增原因 *").fill("Playwright验证一个信号连接多个ECU")
     save_started = perf_counter()
-    page.get_by_role("button", name="新增接收分支").click()
+    page.locator("button:not([disabled])").filter(has_text="新增接收分支").click()
     expected_heading = f"接收端点 · {initial_receiver_count + 1}"
     page.get_by_text(expected_heading, exact=True).wait_for(timeout=15000)
     save_latency_ms = (perf_counter() - save_started) * 1000

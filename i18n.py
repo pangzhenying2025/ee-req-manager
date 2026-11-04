@@ -18,6 +18,7 @@ TRANSLATIONS = {
     "📡 信号管理": "📡 Signals",
     "📥 DBC导入": "📥 DBC Import",
     "📥 Excel通讯矩阵": "📥 Excel Matrix",
+    "🧮 通信矩阵对比": "🧮 Matrix Compare",
     "🔗 功能-信号关联": "🔗 Func-Signal Links",
     "🔄 逻辑关系": "🔄 Logic Relations",
     "📊 追溯矩阵": "📊 Traceability",

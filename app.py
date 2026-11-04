@@ -3,11 +3,8 @@ EE-Req Manager — 汽车电子电气架构需求管理工具
 Streamlit 主应用
 """
 import json
-import os
-import tempfile
 from datetime import datetime
 
-import cantools
 import openpyxl
 import pandas as pd
 import streamlit as st
@@ -50,6 +47,7 @@ from requirements_ui import (
 from requirements_ui import (
     page_traceability as page_requirement_traceability,
 )
+from services.dbc_import import parse_dbc_file, safe_num
 from signal_flow import (
     add_receiver,
     effective_ecus,
@@ -61,6 +59,7 @@ from signal_flow import (
     signal_flow_editor,
     sync_signal_endpoints,
 )
+from workspaces.matrix_compare import page_matrix_compare
 
 st.set_page_config(
     page_title="EE Requirements & Architecture",
@@ -119,7 +118,7 @@ st.sidebar.divider()
 NAV_KEYS = [
     "▦ 工程总览", "▤ 需求规范", "⌁ 需求追溯", "◆ 基线与变更", "▣ 知识与评审",
     "📋 功能管理", "🔄 功能逻辑", "📡 信号管理", "🔗 功能-信号关联",
-    "📥 DBC导入", "📥 Excel通讯矩阵", "📊 接口追溯矩阵",
+    "📥 DBC导入", "📥 Excel通讯矩阵", "🧮 通信矩阵对比", "📊 接口追溯矩阵",
     "📤 数据导出", "🚘 车型管理", "⚙️ 配置管理",
 ]
 NAV_LABELS = [t(k) for k in NAV_KEYS]
@@ -131,7 +130,7 @@ page_label = st.sidebar.radio(
 page = NAV_KEYS[NAV_LABELS.index(page_label)]
 st.sidebar.divider()
 render_presence(current_project_id, page)
-st.sidebar.caption(f"v0.7.0 · {datetime.now().strftime('%Y-%m-%d')}")
+st.sidebar.caption(f"v0.8.0 · {datetime.now().strftime('%Y-%m-%d')}")
 
 
 # ========== 通用工具 ==========
@@ -139,25 +138,6 @@ def get_session():
     return SessionLocal()
 
 
-def safe_num(v, cast, default):
-    """安全转换数字，转换失败返回默认值"""
-    try:
-        return cast(v) if v is not None else default
-    except (ValueError, TypeError):
-        return default
-
-
-def safe_decode(text):
-    """修复DBC中文乱码：Latin-1误读 → GBK还原"""
-    try:
-        text.encode('ascii')
-        return text
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
-    try:
-        return text.encode('latin-1').decode('gbk')
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        return text
 
 
 def notify(msg, ntype="success"):
@@ -1225,10 +1205,8 @@ def render_signal_flow_workbench(db, signals, project_id):
                 st.session_state.flow_selected_signal = event.get("signal_id")
             if event.get("action") == "select_signal":
                 st.session_state.pop("flow_pending_endpoint_change", None)
-                # The component was rendered with the previous selection before
-                # this event arrived. Re-render only this fragment so the canvas
-                # highlight and the inspector always point to the same signal.
-                st.rerun(scope="fragment")
+                # Render the inspector below using the new selection in this
+                # same pass; the canvas keeps its local pending highlight.
             elif event.get("action") in {"move_receiver", "add_receiver"}:
                 st.session_state.flow_pending_endpoint_change = event
                 st.session_state.flow_connection_operation = (
@@ -1321,7 +1299,9 @@ def render_signal_flow_workbench(db, signals, project_id):
                     add_ecu_key = f"flow_add_ecu_{selected_signal.id}_{operation_nonce}"
                     add_reason_key = f"flow_add_reason_{selected_signal.id}_{operation_nonce}"
                     add_changed_by_key = f"flow_add_by_{selected_signal.id}"
-                    with st.form(f"flow_add_form_{selected_signal.id}_{operation_nonce}"):
+                    # Keep the form container stable across fragment selections;
+                    # per-object widget keys still isolate the edited values.
+                    with st.form(f"flow_add_form_{project_id}"):
                         st.selectbox("新增接收 ECU", add_options, index=add_index, key=add_ecu_key)
                         st.text_area(
                             "新增原因 *",
@@ -1370,7 +1350,7 @@ def render_signal_flow_workbench(db, signals, project_id):
                     st.info("没有尚未连接的候选 ECU。")
                 else:
                     move_index = move_options.index(proposed_ecu) if proposed_ecu in move_options else 0
-                    with st.form(f"flow_move_form_{selected_signal.id}_{selected_endpoint.id}_{operation_nonce}"):
+                    with st.form(f"flow_move_form_{project_id}"):
                         move_ecu = st.selectbox("移动到 ECU", move_options, index=move_index)
                         move_reason = st.text_area(
                             "移动原因 *",
@@ -1412,7 +1392,7 @@ def render_signal_flow_workbench(db, signals, project_id):
                 )
                 delete_reason_key = f"flow_delete_reason_{delete_endpoint.id}"
                 delete_changed_by_key = f"flow_delete_by_{selected_signal.id}"
-                with st.form(f"flow_delete_form_{delete_endpoint.id}"):
+                with st.form(f"flow_delete_form_{project_id}"):
                     st.text_area(
                         "删除原因 *",
                         placeholder="删除仅停用当前项目中的连接，DBC 原始证据和审计记录仍保留。",
@@ -1447,7 +1427,7 @@ def render_signal_flow_workbench(db, signals, project_id):
                         format_func=lambda row: f"{row.ecu_name} → {row.dbc_ecu_name}",
                         key=f"flow_reset_endpoint_{selected_signal.id}",
                     )
-                    with st.form(f"flow_reset_form_{reset_endpoint.id}"):
+                    with st.form(f"flow_reset_form_{project_id}"):
                         reset_reason = st.text_input("恢复原因 *", placeholder="说明为何恢复到 DBC 原始节点")
                         if st.form_submit_button(
                             "恢复 DBC 原始节点",
@@ -1477,7 +1457,7 @@ def render_signal_flow_workbench(db, signals, project_id):
                         format_func=lambda row: f"{row.ecu_name} · {'DBC来源' if row.dbc_ecu_name else '人工新增'}",
                         key=f"flow_reactivate_endpoint_{selected_signal.id}",
                     )
-                    with st.form(f"flow_reactivate_form_{restore_endpoint.id}"):
+                    with st.form(f"flow_reactivate_form_{project_id}"):
                         restore_reason = st.text_input("恢复原因 *", placeholder="说明重新启用该接收连接的原因")
                         if st.form_submit_button(
                             "恢复连接",
@@ -2341,50 +2321,6 @@ def page_traceability():
 # ================================================================
 #  📥 DBC导入
 # ================================================================
-def parse_dbc_file(uploaded_file):
-    """解析DBC文件，返回信号列表"""
-    # 保存到临时文件
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.dbc') as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
-    
-    try:
-        db = cantools.database.load_file(tmp_path)
-        signals = []
-        
-        for msg in db.messages:
-            for sig in msg.signals:
-                # 解析值描述
-                value_desc = ""
-                if sig.choices:
-                    value_desc = ", ".join([f"{v}:{k}" for k, v in sig.choices.items()][:5])
-                    if len(sig.choices) > 5:
-                        value_desc += "..."
-                
-                signals.append({
-                    "message_name": msg.name,
-                    "message_id": f"0x{msg.frame_id:03X}",
-                    "message_id_dec": msg.frame_id,
-                    "dlc": msg.length,
-                    "signal_name": sig.name,
-                    "start_bit": sig.start,
-                    "bit_length": sig.length,
-                    "byte_order": "Motorola" if sig.byte_order == "big_endian" else "Intel",
-                    "value_type": "Signed" if sig.is_signed else "Unsigned",
-                    "factor": sig.scale,
-                    "offset": sig.offset,
-                    "min": safe_num(sig.minimum, float, None),
-                    "max": safe_num(sig.maximum, float, None),
-                    "unit": sig.unit or "",
-                    "comment": safe_decode(sig.comment) if sig.comment else "",
-                    "value_desc": value_desc,
-                    "senders": ", ".join(msg.senders) if msg.senders else "",
-                    "cycle_time": msg.cycle_time if hasattr(msg, 'cycle_time') else None,
-                })
-        
-        return signals, db
-    finally:
-        os.unlink(tmp_path)
 
 
 def page_dbc_import():
@@ -3640,6 +3576,7 @@ PAGES = {
     "📡 信号管理": page_signals,
     "📥 DBC导入": page_dbc_import,
     "📥 Excel通讯矩阵": page_excel_import,
+    "🧮 通信矩阵对比": page_matrix_compare,
     "🔗 功能-信号关联": page_func_signal,
     "📊 接口追溯矩阵": page_traceability,
     "📤 数据导出": page_export,
