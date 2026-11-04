@@ -7,6 +7,8 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+from tests import database  # noqa: F401
+
 import db
 from collaboration import acquire_lock, active_sessions, release_lock, touch_session
 

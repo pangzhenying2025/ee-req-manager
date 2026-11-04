@@ -16,6 +16,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./style.css";
+import { mergeNodePositions, selectSignal } from "./graph-state.mjs";
 
 const send = (type, extra = {}) => window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
 const setHeight = (height) => send("streamlit:setFrameHeight", { height });
@@ -191,6 +192,8 @@ async function elkLayout(nodes, edges) {
 function FlowCanvas({ args }) {
   const wrapperRef = useRef(null);
   const modelKeyRef = useRef("");
+  const viewKeyRef = useRef(args.viewStateKey);
+  const pendingSelectionRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const reactFlow = useReactFlow();
   const emit = useCallback((payload) => {
@@ -199,9 +202,8 @@ function FlowCanvas({ args }) {
     setValue({ ...payload, viewport, nonce: nonce() });
   }, [args, reactFlow]);
   const onSelect = useCallback((signalId) => {
-    setNodes((current) => current.map((node) => node.type === "signal"
-      ? { ...node, data: { ...node.data, selected: Number(node.data.signalId) === Number(signalId) } }
-      : node));
+    pendingSelectionRef.current = Number(signalId);
+    setNodes((current) => selectSignal(current, signalId));
     emit({ action: "select_signal", signal_id: signalId });
   }, [emit]);
   const initial = useMemo(() => buildModel(args, onSelect), [args, onSelect]);
@@ -223,16 +225,23 @@ function FlowCanvas({ args }) {
     })),
   });
   useEffect(() => {
+    const sameView = viewKeyRef.current === args.viewStateKey;
+    if (!sameView) pendingSelectionRef.current = null;
+    const selectedId = pendingSelectionRef.current ?? args.selectedSignalId;
+    if (Number(args.selectedSignalId) === pendingSelectionRef.current) {
+      pendingSelectionRef.current = null;
+    }
     if (modelKeyRef.current !== modelKey) {
       modelKeyRef.current = modelKey;
-      setNodes(initial.nodes);
+      viewKeyRef.current = args.viewStateKey;
+      setNodes((current) => selectSignal(
+        sameView ? mergeNodePositions(current, initial.nodes) : initial.nodes, selectedId,
+      ));
       setEdges(initial.edges);
       return;
     }
-    setNodes((current) => current.map((node) => node.type === "signal"
-      ? { ...node, data: { ...node.data, selected: Number(node.data.signalId) === Number(args.selectedSignalId) } }
-      : node));
-  }, [args.selectedSignalId, initial, modelKey]);
+    setNodes((current) => selectSignal(current, selectedId));
+  }, [args.selectedSignalId, args.viewStateKey, initial, modelKey]);
 
   const onInit = useCallback((instance) => {
     const saved = args.viewportState?.x != null ? args.viewportState : readViewport(args);

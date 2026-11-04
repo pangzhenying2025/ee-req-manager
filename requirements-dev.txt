@@ -1,0 +1,4 @@
+-r requirements.lock
+ruff==0.16.1
+playwright==1.62.0
+pyee==13.0.1

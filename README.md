@@ -106,13 +106,16 @@ streamlit run app.py
 
 ## 验证
 
+双击 `开发.bat`：使用独立演示库，自动启动 Streamlit 与画布热更新。双击 `检查.bat`：一键检查。
+
 ```powershell
-python -m py_compile app.py db.py i18n.py requirements_ui.py automotive_knowledge.py requirements_knowledge_ui.py
-ruff check app.py db.py requirements_ui.py automotive_knowledge.py requirements_knowledge_ui.py
-python -m unittest discover -s tests -v
+.venv\Scripts\python.exe scripts/dev.py check
+.venv\Scripts\python.exe scripts/dev.py check --frontend --ui
 ```
 
-当前自动化测试覆盖外键、车型隔离、追溯/基线写入和旧数据库安全迁移。
+首次环境准备、端口设置、模块边界和发布流程见 [开发指南](docs/development.md)。
+
+自动化检查覆盖外键、车型隔离、追溯/基线、旧数据库迁移，以及独立演示场景的浏览器回归。GitHub Actions 配置会在推送后运行。
 
 ## 技术栈
 

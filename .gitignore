@@ -28,6 +28,8 @@ _build/
 .ruff_cache/
 .venv/
 node_modules/
+.dev/
+test-results/
 
 # User documents (not for repo)
 *.docx
@@ -35,3 +37,4 @@ node_modules/
 *.png
 *.txt
 !requirements.txt
+!requirements-dev.txt

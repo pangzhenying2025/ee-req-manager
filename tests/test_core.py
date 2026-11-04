@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import tempfile
 import unittest
@@ -6,8 +5,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 
-TEST_DIR = tempfile.TemporaryDirectory()
-os.environ["EE_REQ_DB_PATH"] = str(Path(TEST_DIR.name) / "core.db")
+from tests.database import TEST_DIR  # noqa: F401
 
 import db  # noqa: E402
 
@@ -20,7 +18,6 @@ class RequirementsCoreTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         db.engine.dispose()
-        TEST_DIR.cleanup()
 
     def setUp(self):
         self.session = db.SessionLocal()

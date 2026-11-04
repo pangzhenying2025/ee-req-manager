@@ -5,8 +5,10 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+from tests import database  # noqa: F401
+
 import db
-from signal_flow import (
+from services.signal_endpoints import (
     add_receiver,
     move_receiver,
     parse_signal_metadata,

@@ -4,7 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "vite build"
+    "dev": "vite --host 127.0.0.1 --strictPort",
+    "build": "vite build",
+    "check": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@xyflow/react": "12.8.6",

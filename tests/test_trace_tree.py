@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
 
-from requirements_ui import _build_function_requirement_trace, _legacy_requirement_type
+from services.requirement_policy import legacy_requirement_type as _legacy_requirement_type
+from services.traceability import build_function_requirement_trace as _build_function_requirement_trace
 
 
 def item(**values):
